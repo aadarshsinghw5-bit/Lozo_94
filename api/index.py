@@ -1,56 +1,65 @@
 import os
-import requests
+from datetime import datetime, timezone
 
+import requests
 from fastapi import FastAPI, Query
 from fastapi.responses import RedirectResponse, HTMLResponse
-from supabase import create_client, Client
+from supabase import create_client
 
 
 app = FastAPI()
 
 
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip()
-SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
 
-BOT_USERNAME = os.getenv("BOT_USERNAME", "").strip().lstrip("@")
+SUPABASE_SERVICE_ROLE_KEY = os.getenv(
+    "SUPABASE_SERVICE_ROLE_KEY",
+    ""
+).strip()
+
+BOT_USERNAME = os.getenv(
+    "BOT_USERNAME",
+    ""
+).strip().lstrip("@")
 
 AROLINKS_API_URL = os.getenv(
     "AROLINKS_API_URL",
     "https://arolinks.com/api"
 ).strip()
 
-AROLINKS_API_KEY = os.getenv("AROLINKS_API_KEY", "").strip()
+AROLINKS_API_KEY = os.getenv(
+    "AROLINKS_API_KEY",
+    ""
+).strip()
 
 
-def get_supabase() -> Client:
-    return create_client(
-        SUPABASE_URL,
-        SUPABASE_SERVICE_ROLE_KEY
-    )
-
-
-def error_page(message: str):
+def error_page(message: str, status_code: int = 400):
     return HTMLResponse(
-        f"""
+        content=f"""
         <!DOCTYPE html>
         <html>
         <head>
             <meta name="viewport" content="width=device-width, initial-scale=1">
-            <title>Link Error</title>
+            <title>Gateway</title>
             <style>
                 body {{
-                    background:#111;
-                    color:white;
-                    font-family:Arial,sans-serif;
-                    text-align:center;
-                    padding:60px 20px;
+                    background: #111827;
+                    color: white;
+                    font-family: Arial, sans-serif;
+                    text-align: center;
+                    padding: 50px 18px;
                 }}
+
                 .box {{
-                    max-width:420px;
-                    margin:auto;
-                    padding:30px;
-                    border-radius:16px;
-                    background:#1d1d1d;
+                    max-width: 420px;
+                    margin: auto;
+                    padding: 28px;
+                    border-radius: 16px;
+                    background: #1f2937;
+                }}
+
+                h2 {{
+                    margin: 0;
                 }}
             </style>
         </head>
@@ -61,7 +70,20 @@ def error_page(message: str):
         </body>
         </html>
         """,
-        status_code=400
+        status_code=status_code
+    )
+
+
+def get_supabase():
+    if not SUPABASE_URL:
+        raise RuntimeError("SUPABASE_URL is missing")
+
+    if not SUPABASE_SERVICE_ROLE_KEY:
+        raise RuntimeError("SUPABASE_SERVICE_ROLE_KEY is missing")
+
+    return create_client(
+        SUPABASE_URL,
+        SUPABASE_SERVICE_ROLE_KEY
     )
 
 
@@ -69,7 +91,7 @@ def error_page(message: str):
 async def home():
     return {
         "status": "ok",
-        "service": "shortener-gateway"
+        "service": "lozo-94-gateway"
     }
 
 
@@ -82,26 +104,30 @@ async def health():
 
 @app.get("/api/gateway")
 async def gateway(
-    token: str = Query(..., min_length=10)
+    token: str = Query(...)
 ):
-    # Basic configuration check
-    if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
-        return error_page("⚠️ Gateway is not configured correctly.")
+    token = token.strip()
+
+    if not token or len(token) < 10:
+        return error_page("❌ Invalid link.")
 
     if not BOT_USERNAME:
-        return error_page("⚠️ Bot username is not configured.")
+        return error_page(
+            "⚠️ BOT_USERNAME is missing in Vercel."
+        )
 
     if not AROLINKS_API_KEY:
-        return error_page("⚠️ Shortener is not configured correctly.")
+        return error_page(
+            "⚠️ AROLinks API key is missing in Vercel."
+        )
 
     try:
         supabase = get_supabase()
 
-        # Check token in Supabase
         result = (
             supabase
             .table("tokens")
-            .select("*")
+            .select("token,user_id,target,expires_at,used")
             .eq("token", token)
             .limit(1)
             .execute()
@@ -110,61 +136,71 @@ async def gateway(
         rows = result.data or []
 
         if not rows:
-            return error_page("❌ Invalid or expired link.")
+            return error_page(
+                "❌ This link is invalid or expired."
+            )
 
         row = rows[0]
 
-        # Already used
         if row.get("used") is True:
-            return error_page("❌ This link has already been used.")
+            return error_page(
+                "❌ This link has already been used."
+            )
 
-        # Check expiry
         expires_at = row.get("expires_at")
 
         if not expires_at:
-            return error_page("❌ Invalid link.")
-
-        from datetime import datetime, timezone
+            return error_page(
+                "❌ This link has no expiry."
+            )
 
         try:
             expiry = datetime.fromisoformat(
-                expires_at.replace("Z", "+00:00")
+                str(expires_at).replace("Z", "+00:00")
             )
 
             if expiry.tzinfo is None:
-                expiry = expiry.replace(tzinfo=timezone.utc)
+                expiry = expiry.replace(
+                    tzinfo=timezone.utc
+                )
 
             if datetime.now(timezone.utc) >= expiry:
-                return error_page("❌ This link has expired.")
+                return error_page(
+                    "❌ This link has expired."
+                )
 
         except Exception:
-            return error_page("❌ Invalid link expiry.")
+            return error_page(
+                "❌ Invalid expiry information."
+            )
 
-        # Telegram verification destination
-        verify_url = (
+        telegram_url = (
             f"https://t.me/{BOT_USERNAME}"
             f"?start=verify_{token}"
         )
 
-        # Create AroLinks short URL
-        response = requests.get(
+        shortener_response = requests.get(
             AROLINKS_API_URL,
             params={
                 "api": AROLINKS_API_KEY,
-                "url": verify_url
+                "url": telegram_url
             },
             timeout=20
         )
 
-        response.raise_for_status()
+        shortener_response.raise_for_status()
 
         try:
-            data = response.json()
+            data = shortener_response.json()
         except Exception:
-            return error_page("⚠️ Shortener returned an invalid response.")
+            return error_page(
+                "⚠️ AroLinks returned an invalid response."
+            )
 
         if data.get("status") != "success":
-            return error_page("⚠️ Unable to create shortener link.")
+            return error_page(
+                "⚠️ AroLinks could not create the link."
+            )
 
         shortened_url = (
             data.get("shortenedUrl")
@@ -172,16 +208,19 @@ async def gateway(
         )
 
         if not shortened_url:
-            return error_page("⚠️ Shortener did not return a link.")
+            return error_page(
+                "⚠️ AroLinks link was not received."
+            )
 
-        # Final flow:
-        # Gateway → AroLinks → Telegram Verify
         return RedirectResponse(
             url=shortened_url,
             status_code=302
         )
 
-    except Exception:
+    except Exception as error:
+        print("GATEWAY ERROR:", repr(error))
+
         return error_page(
-            "⚠️ Something went wrong. Please try again later."
-        )
+            "⚠️ Gateway error. Please try again later.",
+            status_code=500
+    )
