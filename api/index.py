@@ -10,7 +10,14 @@ from supabase import create_client
 app = FastAPI()
 
 
-SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip()
+# =========================
+# ENVIRONMENT VARIABLES
+# =========================
+
+SUPABASE_URL = os.getenv(
+    "SUPABASE_URL",
+    ""
+).strip()
 
 SUPABASE_SERVICE_ROLE_KEY = os.getenv(
     "SUPABASE_SERVICE_ROLE_KEY",
@@ -22,16 +29,20 @@ BOT_USERNAME = os.getenv(
     ""
 ).strip().lstrip("@")
 
-AROLINKS_API_URL = os.getenv(
-    "AROLINKS_API_URL",
-    "https://arolinks.com/api"
+VPLINK_API_URL = os.getenv(
+    "VPLINK_API_URL",
+    "https://vplink.in/api"
 ).strip()
 
-AROLINKS_API_KEY = os.getenv(
-    "AROLINKS_API_KEY",
+VPLINK_API_KEY = os.getenv(
+    "VPLINK_API_KEY",
     ""
 ).strip()
 
+
+# =========================
+# ERROR PAGE
+# =========================
 
 def error_page(message: str, status_code: int = 400):
     return HTMLResponse(
@@ -40,29 +51,34 @@ def error_page(message: str, status_code: int = 400):
         <html>
         <head>
             <meta name="viewport" content="width=device-width, initial-scale=1">
-            <title>Gateway</title>
+            <title>Link Error</title>
+
             <style>
                 body {{
+                    margin: 0;
+                    padding: 50px 18px;
                     background: #111827;
                     color: white;
                     font-family: Arial, sans-serif;
                     text-align: center;
-                    padding: 50px 18px;
                 }}
 
                 .box {{
                     max-width: 420px;
                     margin: auto;
-                    padding: 28px;
-                    border-radius: 16px;
+                    padding: 30px 22px;
+                    border-radius: 18px;
                     background: #1f2937;
+                    box-shadow: 0 10px 30px rgba(0,0,0,0.25);
                 }}
 
                 h2 {{
                     margin: 0;
+                    font-size: 21px;
                 }}
             </style>
         </head>
+
         <body>
             <div class="box">
                 <h2>{message}</h2>
@@ -74,18 +90,28 @@ def error_page(message: str, status_code: int = 400):
     )
 
 
+# =========================
+# SUPABASE CLIENT
+# =========================
+
 def get_supabase():
     if not SUPABASE_URL:
         raise RuntimeError("SUPABASE_URL is missing")
 
     if not SUPABASE_SERVICE_ROLE_KEY:
-        raise RuntimeError("SUPABASE_SERVICE_ROLE_KEY is missing")
+        raise RuntimeError(
+            "SUPABASE_SERVICE_ROLE_KEY is missing"
+        )
 
     return create_client(
         SUPABASE_URL,
         SUPABASE_SERVICE_ROLE_KEY
     )
 
+
+# =========================
+# HOME ROUTE
+# =========================
 
 @app.get("/")
 async def home():
@@ -95,6 +121,10 @@ async def home():
     }
 
 
+# =========================
+# HEALTH ROUTE
+# =========================
+
 @app.get("/health")
 async def health():
     return {
@@ -102,32 +132,47 @@ async def health():
     }
 
 
+# =========================
+# MAIN GATEWAY
+# =========================
+
 @app.get("/api/gateway")
 async def gateway(
     token: str = Query(...)
 ):
     token = token.strip()
 
+    # Basic token validation
     if not token or len(token) < 10:
-        return error_page("❌ Invalid link.")
+        return error_page(
+            "❌ Invalid link."
+        )
 
+    # Bot username check
     if not BOT_USERNAME:
         return error_page(
             "⚠️ BOT_USERNAME is missing in Vercel."
         )
 
-    if not AROLINKS_API_KEY:
+    # VPLINK API key check
+    if not VPLINK_API_KEY:
         return error_page(
-            "⚠️ AROLinks API key is missing in Vercel."
+            "⚠️ VPLINK API key is missing in Vercel."
         )
 
     try:
         supabase = get_supabase()
 
+        # =========================
+        # CHECK TOKEN IN SUPABASE
+        # =========================
+
         result = (
             supabase
             .table("tokens")
-            .select("token,user_id,target,expires_at,used")
+            .select(
+                "token,user_id,target,expires_at,used"
+            )
             .eq("token", token)
             .limit(1)
             .execute()
@@ -142,10 +187,15 @@ async def gateway(
 
         row = rows[0]
 
+        # Already used check
         if row.get("used") is True:
             return error_page(
                 "❌ This link has already been used."
             )
+
+        # =========================
+        # EXPIRY CHECK
+        # =========================
 
         expires_at = row.get("expires_at")
 
@@ -156,7 +206,10 @@ async def gateway(
 
         try:
             expiry = datetime.fromisoformat(
-                str(expires_at).replace("Z", "+00:00")
+                str(expires_at).replace(
+                    "Z",
+                    "+00:00"
+                )
             )
 
             if expiry.tzinfo is None:
@@ -174,32 +227,50 @@ async def gateway(
                 "❌ Invalid expiry information."
             )
 
+        # =========================
+        # TELEGRAM DESTINATION
+        # =========================
+
         telegram_url = (
             f"https://t.me/{BOT_USERNAME}"
             f"?start=verify_{token}"
         )
 
-        shortener_response = requests.get(
-            AROLINKS_API_URL,
+        # =========================
+        # VPLINK API REQUEST
+        # =========================
+
+        response = requests.get(
+            VPLINK_API_URL,
             params={
-                "api": AROLINKS_API_KEY,
+                "api": VPLINK_API_KEY,
                 "url": telegram_url
             },
             timeout=20
         )
 
-        shortener_response.raise_for_status()
+        response.raise_for_status()
+
+        # =========================
+        # PARSE VPLINK RESPONSE
+        # =========================
 
         try:
-            data = shortener_response.json()
+            data = response.json()
+
         except Exception:
             return error_page(
-                "⚠️ AroLinks returned an invalid response."
+                "⚠️ VPLINK returned an invalid response."
             )
 
         if data.get("status") != "success":
+            message = data.get(
+                "message",
+                "VPLINK could not create the link."
+            )
+
             return error_page(
-                "⚠️ AroLinks could not create the link."
+                f"⚠️ {message}"
             )
 
         shortened_url = (
@@ -209,18 +280,36 @@ async def gateway(
 
         if not shortened_url:
             return error_page(
-                "⚠️ AroLinks link was not received."
+                "⚠️ VPLINK link was not received."
             )
+
+        # =========================
+        # REDIRECT TO VPLINK
+        # =========================
 
         return RedirectResponse(
             url=shortened_url,
             status_code=302
         )
 
+    except requests.RequestException as error:
+        print(
+            "VPLINK REQUEST ERROR:",
+            repr(error)
+        )
+
+        return error_page(
+            "⚠️ VPLINK request failed.",
+            status_code=502
+        )
+
     except Exception as error:
-        print("GATEWAY ERROR:", repr(error))
+        print(
+            "GATEWAY ERROR:",
+            repr(error)
+        )
 
         return error_page(
             "⚠️ Gateway error. Please try again later.",
             status_code=500
-    )
+        )
