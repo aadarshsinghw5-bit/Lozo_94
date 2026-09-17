@@ -1,13 +1,13 @@
 import os
-import hashlib
 import hmac
+import hashlib
 import secrets
 from datetime import datetime, timezone, timedelta
-from urllib.parse import urlencode, urlparse
 
 import requests
 from fastapi import FastAPI, Query, Request
 from fastapi.responses import RedirectResponse, HTMLResponse
+from fastapi import Response
 from supabase import create_client
 
 
@@ -48,24 +48,34 @@ GATEWAY_SECRET = os.getenv(
     ""
 ).strip()
 
+
+# ============================================================
+# SETTINGS
+# ============================================================
+
 SESSION_MINUTES = 10
+
+SESSION_COOKIE = "gateway_session"
+
+# Random extra salt used for signing
+SIGN_VERSION = "v2"
 
 
 # ============================================================
 # ERROR PAGE
 # ============================================================
 
-def error_page(
-    message: str,
-    status_code: int = 400
-):
+def error_page(message: str, status_code: int = 400):
     return HTMLResponse(
         content=f"""
         <!DOCTYPE html>
         <html>
         <head>
-            <meta name="viewport"
-                  content="width=device-width, initial-scale=1">
+            <meta charset="UTF-8">
+            <meta
+                name="viewport"
+                content="width=device-width, initial-scale=1"
+            >
 
             <title>Link Error</title>
 
@@ -113,7 +123,6 @@ def error_page(
 # ============================================================
 
 def get_supabase():
-
     if not SUPABASE_URL:
         raise RuntimeError(
             "SUPABASE_URL is missing"
@@ -131,129 +140,76 @@ def get_supabase():
 
 
 # ============================================================
-# SECRET
+# BASIC CONFIG CHECK
 # ============================================================
 
-def get_secret():
-
-    if not GATEWAY_SECRET:
-        raise RuntimeError(
-            "GATEWAY_SECRET is missing in Vercel."
-        )
-
-    return GATEWAY_SECRET.encode(
-        "utf-8"
+def config_ok():
+    return (
+        bool(SUPABASE_URL)
+        and bool(SUPABASE_SERVICE_ROLE_KEY)
+        and bool(BOT_USERNAME)
+        and bool(VPLINK_API_KEY)
+        and bool(GATEWAY_SECRET)
     )
 
 
 # ============================================================
-# HMAC SIGNING
+# SIGNING
 # ============================================================
 
-def sign_value(value: str):
-
-    signature = hmac.new(
-        get_secret(),
-        value.encode("utf-8"),
+def sign_value(value: str) -> str:
+    return hmac.new(
+        GATEWAY_SECRET.encode(),
+        value.encode(),
         hashlib.sha256
     ).hexdigest()
 
-    return f"{value}.{signature}"
+
+def make_session(token: str, nonce: str, expires: int) -> str:
+    payload = (
+        f"{SIGN_VERSION}|"
+        f"{token}|"
+        f"{nonce}|"
+        f"{expires}"
+    )
+
+    signature = sign_value(payload)
+
+    return (
+        f"{SIGN_VERSION}."
+        f"{token}."
+        f"{nonce}."
+        f"{expires}."
+        f"{signature}"
+    )
 
 
-def verify_signed_value(
-    signed_value: str
+def verify_session(
+    session: str,
+    token: str
 ):
-
-    if not signed_value:
-        return None
-
     try:
+        parts = session.split(".")
 
-        value, signature = (
-            signed_value.rsplit(
-                ".",
-                1
-            )
-        )
-
-        expected = hmac.new(
-            get_secret(),
-            value.encode("utf-8"),
-            hashlib.sha256
-        ).hexdigest()
-
-        if not hmac.compare_digest(
-            signature,
-            expected
-        ):
+        if len(parts) != 5:
             return None
 
-        return value
+        version = parts[0]
+        session_token = parts[1]
+        nonce = parts[2]
+        expires_text = parts[3]
+        signature = parts[4]
 
-    except Exception:
-        return None
-
-
-# ============================================================
-# SESSION
-# ============================================================
-
-def create_session(
-    token: str
-):
-
-    nonce = secrets.token_urlsafe(
-        32
-    )
-
-    expiry = int(
-        (
-            datetime.now(timezone.utc)
-            + timedelta(
-                minutes=SESSION_MINUTES
-            )
-        ).timestamp()
-    )
-
-    raw = (
-        f"{token}:"
-        f"{nonce}:"
-        f"{expiry}"
-    )
-
-    return sign_value(
-        raw
-    )
-
-
-def validate_session(
-    signed_session: str,
-    token: str
-):
-
-    raw = verify_signed_value(
-        signed_session
-    )
-
-    if not raw:
-        return False
-
-    try:
-
-        parts = raw.split(":")
-
-        if len(parts) != 3:
-            return False
-
-        session_token = parts[0]
-        expiry = int(parts[2])
+        if version != SIGN_VERSION:
+            return None
 
         if not hmac.compare_digest(
             session_token,
             token
         ):
-            return False
+            return None
+
+        expires = int(expires_text)
 
         now = int(
             datetime.now(
@@ -261,36 +217,48 @@ def validate_session(
             ).timestamp()
         )
 
-        if now >= expiry:
-            return False
+        if now >= expires:
+            return None
 
-        return True
+        payload = (
+            f"{version}|"
+            f"{session_token}|"
+            f"{nonce}|"
+            f"{expires}"
+        )
+
+        expected = sign_value(payload)
+
+        if not hmac.compare_digest(
+            signature,
+            expected
+        ):
+            return None
+
+        return {
+            "token": session_token,
+            "nonce": nonce,
+            "expires": expires
+        }
 
     except Exception:
-        return False
+        return None
 
 
 # ============================================================
 # SUPABASE TOKEN
 # ============================================================
 
-def get_token_row(
-    token: str
-):
-
+def get_token_row(token: str):
     supabase = get_supabase()
 
     result = (
         supabase
         .table("tokens")
         .select(
-            "token,user_id,target,"
-            "expires_at,used"
+            "token,user_id,target,expires_at,used"
         )
-        .eq(
-            "token",
-            token
-        )
+        .eq("token", token)
         .limit(1)
         .execute()
     )
@@ -307,112 +275,81 @@ def get_token_row(
 # TOKEN VALIDATION
 # ============================================================
 
-def validate_token(row):
+def validate_token(token: str):
+    if not token:
+        return None, "invalid"
 
-    if not row:
-        return (
-            False,
-            "❌ This link is invalid or expired."
-        )
-
-    # IMPORTANT:
-    # Gateway DOES NOT change this value.
-    #
-    # The Telegram bot is responsible for
-    # consuming the token.
-
-    if row.get("used") is True:
-
-        return (
-            False,
-            "❌ This link has already been used."
-        )
-
-    expires_at = row.get(
-        "expires_at"
-    )
-
-    if not expires_at:
-
-        return (
-            False,
-            "❌ This link has no expiry."
-        )
+    if len(token) < 10:
+        return None, "invalid"
 
     try:
+        row = get_token_row(token)
 
-        expiry = datetime.fromisoformat(
-            str(expires_at).replace(
-                "Z",
-                "+00:00"
+        if not row:
+            return None, "invalid"
+
+        if row.get("used") is True:
+            return None, "used"
+
+        expires_at = row.get("expires_at")
+
+        if not expires_at:
+            return None, "expired"
+
+        try:
+            expiry = datetime.fromisoformat(
+                str(expires_at).replace(
+                    "Z",
+                    "+00:00"
+                )
             )
+
+            if expiry.tzinfo is None:
+                expiry = expiry.replace(
+                    tzinfo=timezone.utc
+                )
+
+        except Exception:
+            return None, "expired"
+
+        if datetime.now(
+            timezone.utc
+        ) >= expiry:
+            return None, "expired"
+
+        return row, "ok"
+
+    except Exception as error:
+        print(
+            "TOKEN VALIDATION ERROR:",
+            repr(error)
         )
 
-        if expiry.tzinfo is None:
-
-            expiry = expiry.replace(
-                tzinfo=timezone.utc
-            )
-
-        if (
-            datetime.now(timezone.utc)
-            >= expiry
-        ):
-
-            return (
-                False,
-                "❌ This link has expired."
-            )
-
-    except Exception:
-
-        return (
-            False,
-            "❌ Invalid expiry information."
-        )
-
-    return (
-        True,
-        None
-    )
+        return None, "error"
 
 
 # ============================================================
 # TELEGRAM TARGET
 # ============================================================
 
-def get_target_url(
-    row,
-    token: str
-):
-
+def get_target_url(row, token: str):
     target = str(
         row.get("target") or ""
     ).strip()
 
-    # Existing tokens normally contain the
-    # Telegram target.
-    if target:
+    # If target is a valid Telegram HTTPS URL,
+    # use it.
+    if target.startswith(
+        "https://t.me/"
+    ):
+        return target
 
-        parsed = urlparse(
-            target
-        )
+    if target.startswith(
+        "https://telegram.me/"
+    ):
+        return target
 
-        allowed_hosts = {
-            "t.me",
-            "telegram.me",
-            "www.t.me",
-            "www.telegram.me"
-        }
-
-        if (
-            parsed.scheme == "https"
-            and parsed.netloc.lower()
-            in allowed_hosts
-        ):
-            return target
-
-    # Fallback for existing database rows
+    # Fallback to bot verification URL.
     return (
         f"https://t.me/"
         f"{BOT_USERNAME}"
@@ -421,18 +358,20 @@ def get_target_url(
 
 
 # ============================================================
-# CREATE VP LINK
+# VP LINKS
 # ============================================================
 
-def create_vplink(
-    destination_url: str
-):
+def create_vplink(destination: str):
+    if not VPLINK_API_KEY:
+        raise RuntimeError(
+            "VPLINK API key is missing"
+        )
 
     response = requests.get(
         VPLINK_API_URL,
         params={
             "api": VPLINK_API_KEY,
-            "url": destination_url
+            "url": destination
         },
         timeout=20
     )
@@ -440,40 +379,29 @@ def create_vplink(
     response.raise_for_status()
 
     try:
-
         data = response.json()
 
     except Exception:
-
         raise RuntimeError(
-            "VPLINK returned an invalid response."
+            "VPLINK returned invalid JSON"
         )
 
-    if data.get(
-        "status"
-    ) != "success":
-
+    if data.get("status") != "success":
         raise RuntimeError(
             data.get(
                 "message",
-                "VPLINK could not create the link."
+                "VPLINK could not create link."
             )
         )
 
     shortened_url = (
-        data.get(
-            "shortenedUrl"
-        )
-        or
-        data.get(
-            "shortened_url"
-        )
+        data.get("shortenedUrl")
+        or data.get("shortened_url")
     )
 
     if not shortened_url:
-
         raise RuntimeError(
-            "VPLINK link was not received."
+            "VPLINK shortened URL missing"
         )
 
     return shortened_url
@@ -485,7 +413,6 @@ def create_vplink(
 
 @app.get("/")
 async def home():
-
     return {
         "status": "ok",
         "service": "lozo-94-gateway"
@@ -498,7 +425,6 @@ async def home():
 
 @app.get("/health")
 async def health():
-
     return {
         "status": "ok"
     }
@@ -506,136 +432,103 @@ async def health():
 
 # ============================================================
 # MAIN GATEWAY
-#
-# /api/gateway?token=XXXX
-#
-# Creates a signed browser session and
-# sends the user to VP Links.
 # ============================================================
 
 @app.get("/api/gateway")
 async def gateway(
-    request: Request,
-    token: str = Query(...)
+    token: str = Query(...),
+    response: Response = None
 ):
-
     token = token.strip()
 
     # --------------------------------------------------------
-    # Basic validation
+    # CONFIG CHECK
     # --------------------------------------------------------
+
+    if not config_ok():
+        return error_page(
+            "⚠️ Gateway configuration is incomplete.",
+            500
+        )
+
+    # --------------------------------------------------------
+    # TOKEN CHECK
+    # --------------------------------------------------------
+
+    row, status = validate_token(token)
+
+    if status == "used":
+        return error_page(
+            "❌ This link has already been used."
+        )
+
+    if status == "expired":
+        return error_page(
+            "❌ This link has expired."
+        )
+
+    if status != "ok":
+        return error_page(
+            "❌ This link is invalid."
+        )
+
+    # --------------------------------------------------------
+    # CREATE ONE-TIME SESSION
+    # --------------------------------------------------------
+
+    nonce = secrets.token_urlsafe(24)
+
+    expires = int(
+        (
+            datetime.now(timezone.utc)
+            + timedelta(
+                minutes=SESSION_MINUTES
+            )
+        ).timestamp()
+    )
+
+    session = make_session(
+        token,
+        nonce,
+        expires
+    )
+
+    # --------------------------------------------------------
+    # IMPORTANT
+    #
+    # VP Links destination is NOT Telegram.
+    #
+    # It goes to /api/complete.
+    # --------------------------------------------------------
+
+    complete_url = (
+        f"https://"
+        f"{os.getenv('VERCEL_URL', '').strip()}"
+        f"/api/complete"
+        f"?token={token}"
+    )
+
+    # VERCEL_URL may not exist in some deployments.
+    # Use fixed production hostname as fallback.
 
     if (
-        not token
-        or len(token) < 10
+        not os.getenv(
+            "VERCEL_URL",
+            ""
+        ).strip()
     ):
-
-        return error_page(
-            "❌ Invalid link."
-        )
-
-    # --------------------------------------------------------
-    # Configuration
-    # --------------------------------------------------------
-
-    if not BOT_USERNAME:
-
-        return error_page(
-            "⚠️ BOT_USERNAME is missing in Vercel."
-        )
-
-    if not VPLINK_API_KEY:
-
-        return error_page(
-            "⚠️ VPLINK API key is missing in Vercel."
-        )
-
-    if not GATEWAY_SECRET:
-
-        return error_page(
-            "⚠️ GATEWAY_SECRET is missing in Vercel."
+        complete_url = (
+            "https://lozo-94.vercel.app"
+            "/api/complete"
+            f"?token={token}"
         )
 
     try:
-
-        # ----------------------------------------------------
-        # Database token
-        # ----------------------------------------------------
-
-        row = get_token_row(
-            token
-        )
-
-        valid, message = (
-            validate_token(
-                row
-            )
-        )
-
-        if not valid:
-
-            return error_page(
-                message
-            )
-
-        # ----------------------------------------------------
-        # Session
-        # ----------------------------------------------------
-
-        session = create_session(
-            token
-        )
-
-        # ----------------------------------------------------
-        # Protected return URL
-        #
-        # IMPORTANT:
-        # VP Links gets /api/complete,
-        # NOT the Telegram deep link.
-        # ----------------------------------------------------
-
-        hostname = (
-            request.url.hostname
-            or ""
-        )
-
-        complete_url = (
-            f"https://{hostname}"
-            f"/api/complete?"
-            f"{urlencode({'token': token})}"
-        )
-
-        # ----------------------------------------------------
-        # Create VP Link
-        # ----------------------------------------------------
-
         shortened_url = create_vplink(
             complete_url
         )
 
-        # ----------------------------------------------------
-        # Redirect to VP Links
-        # ----------------------------------------------------
-
-        response = RedirectResponse(
-            url=shortened_url,
-            status_code=302
-        )
-
-        response.set_cookie(
-            key="gateway_session",
-            value=session,
-            max_age=SESSION_MINUTES * 60,
-            httponly=True,
-            secure=True,
-            samesite="lax",
-            path="/"
-        )
-
-        return response
-
     except requests.RequestException as error:
-
         print(
             "VPLINK REQUEST ERROR:",
             repr(error)
@@ -643,34 +536,44 @@ async def gateway(
 
         return error_page(
             "⚠️ VPLINK request failed.",
-            status_code=502
+            502
         )
 
     except Exception as error:
-
         print(
-            "GATEWAY ERROR:",
+            "VPLINK ERROR:",
             repr(error)
         )
 
         return error_page(
-            "⚠️ Gateway error. Please try again later.",
-            status_code=500
+            "⚠️ Could not create short link.",
+            502
         )
+
+    # --------------------------------------------------------
+    # REDIRECT TO VP LINKS
+    # --------------------------------------------------------
+
+    redirect = RedirectResponse(
+        url=shortened_url,
+        status_code=302
+    )
+
+    redirect.set_cookie(
+        key=SESSION_COOKIE,
+        value=session,
+        max_age=SESSION_MINUTES * 60,
+        httponly=True,
+        secure=True,
+        samesite="lax",
+        path="/"
+    )
+
+    return redirect
 
 
 # ============================================================
-# VP LINKS RETURN
-#
-# /api/complete?token=XXXX
-#
-# IMPORTANT:
-# This endpoint NEVER sets tokens.used=True.
-#
-# The Telegram bot does that when it receives:
-#
-# /start verify_TOKEN
-#
+# COMPLETE
 # ============================================================
 
 @app.get("/api/complete")
@@ -678,153 +581,165 @@ async def complete(
     request: Request,
     token: str = Query(...)
 ):
-
     token = token.strip()
 
-    if (
-        not token
-        or len(token) < 10
-    ):
+    # --------------------------------------------------------
+    # CONFIG
+    # --------------------------------------------------------
 
+    if not config_ok():
         return error_page(
-            "❌ Invalid link."
+            "⚠️ Gateway configuration is incomplete.",
+            500
         )
 
-    if not GATEWAY_SECRET:
+    # --------------------------------------------------------
+    # TOKEN CHECK
+    # --------------------------------------------------------
 
+    row, status = validate_token(token)
+
+    if status == "used":
         return error_page(
-            "⚠️ GATEWAY_SECRET is missing in Vercel."
+            "❌ This link has already been used."
         )
 
-    try:
-
-        # ----------------------------------------------------
-        # Token check
-        # ----------------------------------------------------
-
-        row = get_token_row(
-            token
+    if status == "expired":
+        return error_page(
+            "❌ This link has expired."
         )
 
-        valid, message = (
-            validate_token(
-                row
-            )
+    if status != "ok":
+        return error_page(
+            "❌ This link is invalid."
         )
 
-        if not valid:
+    # --------------------------------------------------------
+    # READ SESSION COOKIE
+    # --------------------------------------------------------
 
-            return error_page(
-                message
-            )
+    session = request.cookies.get(
+        SESSION_COOKIE
+    )
 
-        # ----------------------------------------------------
-        # Check browser session
-        # ----------------------------------------------------
+    verified_session = None
 
-        session = request.cookies.get(
-            "gateway_session"
-        )
-
-        if not validate_session(
+    if session:
+        verified_session = verify_session(
             session,
             token
-        ):
-
-            # ------------------------------------------------
-            # No valid session.
-            #
-            # Do NOT expose Telegram target.
-            #
-            # Start a fresh VP cycle.
-            # ------------------------------------------------
-
-            new_session = create_session(
-                token
-            )
-
-            hostname = (
-                request.url.hostname
-                or ""
-            )
-
-            retry_url = (
-                f"https://{hostname}"
-                f"/api/complete?"
-                f"{urlencode({'token': token})}"
-            )
-
-            shortened_url = create_vplink(
-                retry_url
-            )
-
-            response = RedirectResponse(
-                url=shortened_url,
-                status_code=302
-            )
-
-            response.set_cookie(
-                key="gateway_session",
-                value=new_session,
-                max_age=SESSION_MINUTES * 60,
-                httponly=True,
-                secure=True,
-                samesite="lax",
-                path="/"
-            )
-
-            return response
-
-        # ----------------------------------------------------
-        # Valid gateway session
-        # ----------------------------------------------------
-
-        target = get_target_url(
-            row,
-            token
         )
 
-        # ----------------------------------------------------
-        # IMPORTANT:
-        #
-        # DO NOT update tokens.used here.
-        #
-        # Telegram bot must consume the token.
-        # ----------------------------------------------------
+    # --------------------------------------------------------
+    # NO VALID SESSION
+    #
+    # Direct access / bypassed gateway URL:
+    # create another VP cycle instead of
+    # exposing Telegram.
+    # --------------------------------------------------------
 
-        response = RedirectResponse(
-            url=target,
+    if not verified_session:
+
+        nonce = secrets.token_urlsafe(24)
+
+        expires = int(
+            (
+                datetime.now(timezone.utc)
+                + timedelta(
+                    minutes=SESSION_MINUTES
+                )
+            ).timestamp()
+        )
+
+        new_session = make_session(
+            token,
+            nonce,
+            expires
+        )
+
+        complete_url = (
+            f"https://"
+            f"{os.getenv('VERCEL_URL', '').strip()}"
+            f"/api/complete"
+            f"?token={token}"
+        )
+
+        if not os.getenv(
+            "VERCEL_URL",
+            ""
+        ).strip():
+            complete_url = (
+                "https://lozo-94.vercel.app"
+                "/api/complete"
+                f"?token={token}"
+            )
+
+        try:
+            shortened_url = create_vplink(
+                complete_url
+            )
+
+        except requests.RequestException as error:
+            print(
+                "VPLINK REQUEST ERROR:",
+                repr(error)
+            )
+
+            return error_page(
+                "⚠️ VPLINK request failed.",
+                502
+            )
+
+        except Exception as error:
+            print(
+                "VPLINK ERROR:",
+                repr(error)
+            )
+
+            return error_page(
+                "⚠️ Could not create short link.",
+                502
+            )
+
+        redirect = RedirectResponse(
+            url=shortened_url,
             status_code=302
         )
 
-        # Remove session after successful handoff
-        response.delete_cookie(
-            key="gateway_session",
+        redirect.set_cookie(
+            key=SESSION_COOKIE,
+            value=new_session,
+            max_age=SESSION_MINUTES * 60,
+            httponly=True,
+            secure=True,
+            samesite="lax",
             path="/"
         )
 
-        return response
+        return redirect
 
-    except requests.RequestException as error:
+    # --------------------------------------------------------
+    # VALID SESSION
+    #
+    # Do NOT mark token used here.
+    # The Telegram bot does that after
+    # verify_TOKEN is actually processed.
+    # --------------------------------------------------------
 
-        print(
-            "VPLINK REQUEST ERROR:",
-            repr(error)
-        )
+    telegram_url = get_target_url(
+        row,
+        token
+    )
 
-        return error_page(
-            "⚠️ VPLINK request failed.",
-            status_code=502
-        )
+    redirect = RedirectResponse(
+        url=telegram_url,
+        status_code=302
+    )
 
-    except Exception as error:
+    # Delete session immediately after use.
+    redirect.delete_cookie(
+        key=SESSION_COOKIE,
+        path="/"
+    )
 
-        print(
-            "COMPLETE ERROR:",
-            repr(error)
-        )
-
-        return error_page(
-            "⚠️ Gateway error. Please try again later.",
-            status_code=500
-        )
+    return redirect
