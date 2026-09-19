@@ -2,19 +2,13 @@ import os
 import secrets
 import hashlib
 import html
-import time
 from datetime import datetime, timezone, timedelta
 from urllib.parse import urlencode
 
 import requests
-from fastapi import FastAPI, Request, Query
-from fastapi.responses import (
-    HTMLResponse,
-    RedirectResponse,
-    JSONResponse,
-)
-
-from supabase import create_client, Client
+from fastapi import FastAPI, Query, Request
+from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
+from supabase import create_client
 
 
 # ============================================================
@@ -22,237 +16,91 @@ from supabase import create_client, Client
 # ============================================================
 
 SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip()
-SUPABASE_SERVICE_ROLE_KEY = os.getenv("SUPABASE_SERVICE_ROLE_KEY", "").strip()
+SUPABASE_SERVICE_ROLE_KEY = os.getenv(
+    "SUPABASE_SERVICE_ROLE_KEY", ""
+).strip()
 
 BOT_USERNAME = os.getenv("BOT_USERNAME", "").strip().lstrip("@")
 
 VPLINK_API_URL = os.getenv(
     "VPLINK_API_URL",
     "https://vplink.in/api"
-).rstrip("/")
+).strip().rstrip("/")
 
-VPLINK_API_KEY = os.getenv("VPLINK_API_KEY", "").strip()
+VPLINK_API_KEY = os.getenv(
+    "VPLINK_API_KEY",
+    ""
+).strip()
 
 GATEWAY_DOMAIN = os.getenv(
     "GATEWAY_DOMAIN",
     "https://lozo-94.vercel.app"
-).rstrip("/")
+).strip().rstrip("/")
 
-# How long a gateway session remains valid.
-SESSION_MINUTES = int(os.getenv("GATEWAY_SESSION_MINUTES", "30"))
+SESSION_MINUTES = int(
+    os.getenv("SESSION_MINUTES", "30")
+)
 
-# How long the manual verification remains valid.
-VERIFY_MINUTES = int(os.getenv("VERIFY_MINUTES", "10"))
+VERIFY_MINUTES = int(
+    os.getenv("VERIFY_MINUTES", "10")
+)
 
 
 # ============================================================
-# APP
+# APP / SUPABASE
 # ============================================================
 
 app = FastAPI()
 
+supabase = None
 
-# ============================================================
-# SUPABASE
-# ============================================================
-
-if not SUPABASE_URL or not SUPABASE_SERVICE_ROLE_KEY:
-    supabase: Client | None = None
-else:
-    supabase = create_client(
-        SUPABASE_URL,
-        SUPABASE_SERVICE_ROLE_KEY
-    )
+if SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY:
+    try:
+        supabase = create_client(
+            SUPABASE_URL,
+            SUPABASE_SERVICE_ROLE_KEY
+        )
+    except Exception:
+        supabase = None
 
 
 # ============================================================
-# HELPERS
+# CONSTANTS
 # ============================================================
 
-def now_utc() -> datetime:
+ACCESS_COOKIE = "lozo_access"
+VERIFY_COOKIE = "lozo_verified"
+
+EXPIRED_MESSAGE = (
+    "This link has expired and can no longer be accessed. "
+    "Please generate a new link from the channel to continue."
+)
+
+
+# ============================================================
+# BASIC HELPERS
+# ============================================================
+
+def now_utc():
     return datetime.now(timezone.utc)
 
 
-def iso(dt: datetime) -> str:
+def iso(dt):
     return dt.astimezone(timezone.utc).isoformat()
 
 
-def random_token(length: int = 32) -> str:
+def random_id(length=32):
     return secrets.token_urlsafe(length)
 
 
-def sha256(value: str) -> str:
-    return hashlib.sha256(value.encode("utf-8")).hexdigest()
+def sha256(value):
+    return hashlib.sha256(
+        value.encode("utf-8")
+    ).hexdigest()
 
 
 def db_ready():
     return supabase is not None
-
-
-def error_page(title: str, message: str, code: int = 400):
-    return HTMLResponse(
-        f"""
-        <!doctype html>
-        <html>
-        <head>
-            <meta charset="utf-8">
-            <meta name="viewport"
-                  content="width=device-width,initial-scale=1">
-            <title>{html.escape(title)}</title>
-            <style>
-                body {{
-                    margin:0;
-                    background:#0f1115;
-                    color:#fff;
-                    font-family:Arial,sans-serif;
-                    display:flex;
-                    justify-content:center;
-                    align-items:center;
-                    min-height:100vh;
-                    padding:20px;
-                    box-sizing:border-box;
-                }}
-
-                .box {{
-                    max-width:430px;
-                    width:100%;
-                    background:#181b22;
-                    border-radius:18px;
-                    padding:28px;
-                    text-align:center;
-                    box-sizing:border-box;
-                    box-shadow:0 10px 40px rgba(0,0,0,.35);
-                }}
-
-                h2 {{
-                    margin-top:0;
-                }}
-
-                p {{
-                    color:#bfc4ce;
-                    line-height:1.5;
-                }}
-
-                .icon {{
-                    font-size:48px;
-                    margin-bottom:10px;
-                }}
-            </style>
-        </head>
-
-        <body>
-            <div class="box">
-                <div class="icon">⚠️</div>
-                <h2>{html.escape(title)}</h2>
-                <p>{html.escape(message)}</p>
-            </div>
-        </body>
-        </html>
-        """,
-        status_code=code,
-    )
-
-
-def get_token_record(token: str):
-    if not db_ready():
-        return None
-
-    try:
-        result = (
-            supabase
-            .table("tokens")
-            .select("*")
-            .eq("token", token)
-            .limit(1)
-            .execute()
-        )
-
-        if not result.data:
-            return None
-
-        return result.data[0]
-
-    except Exception as e:
-        print("Supabase token lookup error:", repr(e))
-        return None
-
-
-def get_session(state: str):
-    if not db_ready():
-        return None
-
-    try:
-        result = (
-            supabase
-            .table("gateway_states")
-            .select("*")
-            .eq("state", state)
-            .limit(1)
-            .execute()
-        )
-
-        if not result.data:
-            return None
-
-        return result.data[0]
-
-    except Exception as e:
-        print("Supabase gateway state lookup error:", repr(e))
-        return None
-
-
-def save_session(
-    state: str,
-    token: str,
-    expires_at: datetime,
-    challenge_hash: str,
-):
-    if not db_ready():
-        raise RuntimeError("Supabase is not configured")
-
-    data = {
-        "state": state,
-        "token": token,
-        "expires_at": iso(expires_at),
-        "used": False,
-        "challenge_hash": challenge_hash,
-        "verified": False,
-        "verified_at": None,
-    }
-
-    supabase.table("gateway_states").insert(data).execute()
-
-
-def update_session(state: str, values: dict):
-    if not db_ready():
-        return
-
-    try:
-        (
-            supabase
-            .table("gateway_states")
-            .update(values)
-            .eq("state", state)
-            .execute()
-        )
-    except Exception as e:
-        print("Supabase gateway state update error:", repr(e))
-
-
-def delete_session(state: str):
-    if not db_ready():
-        return
-
-    try:
-        (
-            supabase
-            .table("gateway_states")
-            .delete()
-            .eq("state", state)
-            .execute()
-        )
-    except Exception as e:
-        print("Supabase gateway state delete error:", repr(e))
 
 
 def parse_datetime(value):
@@ -260,12 +108,12 @@ def parse_datetime(value):
         return None
 
     try:
-        value = str(value)
-
-        if value.endswith("Z"):
-            value = value[:-1] + "+00:00"
-
-        dt = datetime.fromisoformat(value)
+        if isinstance(value, datetime):
+            dt = value
+        else:
+            dt = datetime.fromisoformat(
+                str(value).replace("Z", "+00:00")
+            )
 
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
@@ -276,24 +124,353 @@ def parse_datetime(value):
         return None
 
 
+def is_expired(value):
+    dt = parse_datetime(value)
+
+    if dt is None:
+        return True
+
+    return dt <= now_utc()
+
+
 # ============================================================
-# VP LINKS
+# HTML
 # ============================================================
 
-def create_vplink(destination: str) -> str | None:
+def error_page(title, message):
+    safe_title = html.escape(title)
+    safe_message = html.escape(message)
+
+    content = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport"
+              content="width=device-width, initial-scale=1.0">
+
+        <title>{safe_title}</title>
+
+        <style>
+            * {{
+                box-sizing: border-box;
+            }}
+
+            body {{
+                margin: 0;
+                min-height: 100vh;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                padding: 20px;
+
+                font-family:
+                    -apple-system,
+                    BlinkMacSystemFont,
+                    "Segoe UI",
+                    Roboto,
+                    Arial,
+                    sans-serif;
+
+                background:
+                    linear-gradient(
+                        135deg,
+                        #0f172a,
+                        #111827,
+                        #020617
+                    );
+
+                color: #ffffff;
+            }}
+
+            .card {{
+                width: 100%;
+                max-width: 470px;
+
+                padding: 34px 26px;
+
+                text-align: center;
+
+                background: rgba(255,255,255,0.06);
+                border: 1px solid rgba(255,255,255,0.10);
+
+                border-radius: 22px;
+
+                box-shadow:
+                    0 20px 60px rgba(0,0,0,0.45);
+
+                backdrop-filter: blur(14px);
+            }}
+
+            .icon {{
+                width: 72px;
+                height: 72px;
+
+                margin: 0 auto 20px;
+
+                display: flex;
+                align-items: center;
+                justify-content: center;
+
+                border-radius: 50%;
+
+                background: rgba(239,68,68,0.15);
+
+                font-size: 34px;
+            }}
+
+            h1 {{
+                margin: 0 0 14px;
+
+                font-size: 25px;
+                font-weight: 700;
+            }}
+
+            p {{
+                margin: 0;
+
+                color: #cbd5e1;
+
+                font-size: 15px;
+                line-height: 1.7;
+            }}
+        </style>
+    </head>
+
+    <body>
+        <div class="card">
+
+            <div class="icon">
+                ⏳
+            </div>
+
+            <h1>{safe_title}</h1>
+
+            <p>{safe_message}</p>
+
+        </div>
+    </body>
+    </html>
     """
-    Tries common VP Links API parameter layouts.
 
-    Expected environment:
-        VPLINK_API_URL
-        VPLINK_API_KEY
+    return HTMLResponse(
+        content=content,
+        status_code=410
+    )
+
+
+# ============================================================
+# TOKEN HELPERS
+# ============================================================
+
+def get_token_record(token):
+    if not db_ready():
+        return None
+
+    try:
+        response = (
+            supabase
+            .table("tokens")
+            .select("*")
+            .eq("token", token)
+            .limit(1)
+            .execute()
+        )
+
+        if response.data:
+            return response.data[0]
+
+    except Exception:
+        return None
+
+    return None
+
+
+# ============================================================
+# ONE-TIME ORIGINAL GATEWAY ENTRY
+# ============================================================
+
+def token_entry_used(token):
+    """
+    Checks whether this original bot gateway token has already
+    been entered once.
+
+    `entry_used` is intentionally separate from `used`.
+
+    entry_used = original /api/gateway URL has already been opened
+    used       = final gateway session has delivered the Telegram
+                 handoff
+    """
+
+    if not db_ready():
+        return False
+
+    try:
+        response = (
+            supabase
+            .table("gateway_states")
+            .select("state")
+            .eq("token", token)
+            .eq("entry_used", True)
+            .limit(1)
+            .execute()
+        )
+
+        return bool(response.data)
+
+    except Exception:
+        return False
+
+
+# ============================================================
+# SESSION HELPERS
+# ============================================================
+
+def get_session(state):
+    if not db_ready():
+        return None
+
+    try:
+        response = (
+            supabase
+            .table("gateway_states")
+            .select("*")
+            .eq("state", state)
+            .limit(1)
+            .execute()
+        )
+
+        if response.data:
+            return response.data[0]
+
+    except Exception:
+        return None
+
+    return None
+
+
+def get_session_by_verify_id(verify_id):
+    if not db_ready():
+        return None
+
+    try:
+        response = (
+            supabase
+            .table("gateway_states")
+            .select("*")
+            .eq("challenge_hash", sha256(verify_id))
+            .limit(1)
+            .execute()
+        )
+
+        if response.data:
+            return response.data[0]
+
+    except Exception:
+        return None
+
+    return None
+
+
+def save_session(
+    state,
+    token,
+    expires_at,
+    browser_hash
+):
+    if not db_ready():
+        return False
+
+    try:
+        payload = {
+            "state": state,
+            "token": token,
+            "expires_at": iso(expires_at),
+
+            # Final delivery state
+            "used": False,
+
+            # NEW:
+            # Original /api/gateway entry is consumed
+            # immediately on first successful gateway creation.
+            "entry_used": True,
+
+            "challenge_hash": None,
+            "verified": False,
+            "verified_at": None,
+            "verify_expires_at": None,
+
+            "browser_hash": browser_hash,
+        }
+
+        supabase \
+            .table("gateway_states") \
+            .insert(payload) \
+            .execute()
+
+        return True
+
+    except Exception:
+        return False
+
+
+def update_session(state, values):
+    if not db_ready():
+        return False
+
+    try:
+        (
+            supabase
+            .table("gateway_states")
+            .update(values)
+            .eq("state", state)
+            .execute()
+        )
+
+        return True
+
+    except Exception:
+        return False
+
+
+def delete_session(state):
+    if not db_ready():
+        return False
+
+    try:
+        (
+            supabase
+            .table("gateway_states")
+            .delete()
+            .eq("state", state)
+            .execute()
+        )
+
+        return True
+
+    except Exception:
+        return False
+
+
+# ============================================================
+# VPLink
+# ============================================================
+
+def create_vplink(destination):
+    """
+    Attempts multiple common VPLink API formats.
     """
 
     if not VPLINK_API_KEY:
-        print("VPLINK_API_KEY missing")
         return None
 
-    candidates = [
+    endpoints = [
+        VPLINK_API_URL,
+        f"{VPLINK_API_URL}/shorten",
+        f"{VPLINK_API_URL}/create",
+    ]
+
+    query_variants = [
         {
             "api": VPLINK_API_KEY,
             "url": destination,
@@ -306,844 +483,362 @@ def create_vplink(destination: str) -> str | None:
             "key": VPLINK_API_KEY,
             "url": destination,
         },
-    ]
-
-    headers_list = [
-        {},
         {
-            "Authorization": f"Bearer {VPLINK_API_KEY}"
+            "api": VPLINK_API_KEY,
+            "link": destination,
         },
     ]
 
-    for payload in candidates:
-        for headers in headers_list:
+    for endpoint in endpoints:
+        for params in query_variants:
+
             try:
                 response = requests.get(
-                    VPLINK_API_URL,
-                    params=payload,
-                    headers=headers,
-                    timeout=15,
+                    endpoint,
+                    params=params,
+                    timeout=15
                 )
 
-                print(
-                    "VPLink:",
-                    response.status_code,
-                    response.text[:500]
-                )
-
-                if response.status_code >= 400:
+                if response.status_code != 200:
                     continue
 
                 try:
                     data = response.json()
                 except Exception:
-                    data = {}
+                    data = None
 
-                # Common response fields.
-                for key in (
-                    "shortenedUrl",
-                    "short_url",
-                    "shorturl",
-                    "url",
-                    "link",
-                    "shortened",
-                    "result",
-                ):
-                    value = data.get(key)
+                if isinstance(data, dict):
 
-                    if isinstance(value, str):
-                        if value.startswith("http://") or value.startswith("https://"):
-                            return value
-
-                # Some APIs return nested result.
-                result = data.get("result")
-
-                if isinstance(result, dict):
                     for key in (
+                        "shortenedUrl",
+                        "shortened_url",
+                        "short_url",
+                        "short",
                         "url",
                         "link",
-                        "short_url",
-                        "shortenedUrl",
                     ):
-                        value = result.get(key)
+                        value = data.get(key)
 
-                        if isinstance(value, str):
-                            if value.startswith("http://") or value.startswith("https://"):
+                        if (
+                            isinstance(value, str)
+                            and value.startswith("http")
+                        ):
+                            return value
+
+                    result = data.get("result")
+
+                    if (
+                        isinstance(result, str)
+                        and result.startswith("http")
+                    ):
+                        return result
+
+                    if isinstance(result, dict):
+                        for key in (
+                            "url",
+                            "link",
+                            "short_url",
+                            "shortenedUrl",
+                            "shortened_url",
+                        ):
+                            value = result.get(key)
+
+                            if (
+                                isinstance(value, str)
+                                and value.startswith("http")
+                            ):
                                 return value
 
-            except Exception as e:
-                print("VPLink request error:", repr(e))
+                elif isinstance(data, str):
+                    value = data.strip()
+
+                    if value.startswith("http"):
+                        return value
+
+                raw = response.text.strip()
+
+                if raw.startswith("http"):
+                    return raw
+
+            except Exception:
+                continue
 
     return None
 
 
 # ============================================================
-# HOME / HEALTH
+# ACCESS PAGE
 # ============================================================
 
-@app.get("/")
-async def home():
-    return {
-        "ok": True,
-        "service": "lozo-gateway",
-        "status": "running",
-    }
-
-
-@app.get("/health")
-async def health():
-    return {
-        "ok": True,
-    }
-
-
-# ============================================================
-# MAIN GATEWAY
-# ============================================================
-
-@app.get("/api/gateway")
-async def gateway(
-    token: str = Query(default="")
-):
-    """
-    Telegram bot sends users here:
-
-        /api/gateway?token=XXXX
-
-    We DO NOT expose the Telegram deep link to VP Links.
-
-    Instead:
-        token
-          ↓
-        random state
-          ↓
-        /api/complete?state=...
-          ↓
-        VP Links
-    """
-
-    if not token:
-        return error_page(
-            "Invalid Link",
-            "This gateway link is missing its token."
-        )
-
-    if not db_ready():
-        return error_page(
-            "Gateway Error",
-            "Gateway database is not configured.",
-            500
-        )
-
-    record = get_token_record(token)
-
-    if not record:
-        return error_page(
-            "Invalid Link",
-            "This file link is invalid or no longer exists."
-        )
-
-    # IMPORTANT:
-    # Do NOT reject based on used here if your bot is responsible
-    # for finally consuming the original token.
-    #
-    # We only check obvious expiry if expires_at exists.
-
-    expires = parse_datetime(record.get("expires_at"))
-
-    if expires and expires < now_utc():
-        return error_page(
-            "Link Expired",
-            "This file link has expired."
-        )
-
-    # --------------------------------------------------------
-    # Generate completely random gateway state.
-    # --------------------------------------------------------
-
-    state = random_token(32)
-
-    # Browser challenge.
-    challenge = random_token(24)
-    challenge_hash = sha256(challenge)
-
-    session_expiry = now_utc() + timedelta(
-        minutes=SESSION_MINUTES
-    )
-
-    try:
-        save_session(
-            state=state,
-            token=token,
-            expires_at=session_expiry,
-            challenge_hash=challenge_hash,
-        )
-    except Exception as e:
-        print("Session creation error:", repr(e))
-
-        return error_page(
-            "Gateway Error",
-            "Unable to create a secure session.",
-            500
-        )
-
-    # --------------------------------------------------------
-    # VP destination.
-    #
-    # IMPORTANT:
-    # Telegram URL is NEVER given to VP Links.
-    # --------------------------------------------------------
-
-    complete_url = (
-        f"{GATEWAY_DOMAIN}/api/complete?"
-        f"{urlencode({'state': state})}"
-    )
-
-    short_url = create_vplink(complete_url)
-
-    if not short_url:
-        delete_session(state)
-
-        return error_page(
-            "Shortener Error",
-            "Unable to create the verification link. Please try again.",
-            502
-        )
-
-    # --------------------------------------------------------
-    # Show a simple start page before redirect.
-    # --------------------------------------------------------
-
-    return HTMLResponse(
-        f"""
-        <!doctype html>
-        <html>
-        <head>
-            <meta charset="utf-8">
-            <meta name="viewport"
-                  content="width=device-width,initial-scale=1">
-
-            <meta http-equiv="refresh"
-                  content="0;url={html.escape(short_url)}">
-
-            <title>Secure Access</title>
-
-            <style>
-                body {{
-                    margin:0;
-                    background:#0f1115;
-                    color:white;
-                    font-family:Arial,sans-serif;
-                    display:flex;
-                    align-items:center;
-                    justify-content:center;
-                    min-height:100vh;
-                }}
-
-                .box {{
-                    text-align:center;
-                    background:#181b22;
-                    padding:30px;
-                    border-radius:20px;
-                    width:min(420px,90%);
-                    box-sizing:border-box;
-                }}
-
-                .loader {{
-                    width:42px;
-                    height:42px;
-                    border:4px solid #444;
-                    border-top-color:#fff;
-                    border-radius:50%;
-                    animation:spin 1s linear infinite;
-                    margin:0 auto 18px;
-                }}
-
-                @keyframes spin {{
-                    to {{
-                        transform:rotate(360deg);
-                    }}
-                }}
-
-                p {{
-                    color:#bbb;
-                }}
-
-                a {{
-                    color:white;
-                }}
-            </style>
-        </head>
-
-        <body>
-            <div class="box">
-                <div class="loader"></div>
-                <h2>Preparing Secure Link</h2>
-                <p>Please wait...</p>
-                <p>
-                    <a href="{html.escape(short_url)}">
-                        Continue
-                    </a>
-                </p>
-            </div>
-        </body>
-        </html>
-        """,
-        status_code=200,
-    )
-
-
-# ============================================================
-# COMPLETE
-# ============================================================
-
-@app.get("/api/complete")
-async def complete(
-    request: Request,
-    state: str = Query(default="")
-):
-    """
-    VP Links should eventually redirect here.
-
-    We intentionally DO NOT immediately redirect to Telegram.
-
-    First visit:
-        /api/complete?state=XYZ
-
-    shows manual verification.
-
-    After verification:
-        verified cookie
-        ↓
-        Telegram
-    """
-
-    if not state:
-        return error_page(
-            "Verification Required",
-            "Please manually verify. Don't try to bypass."
-        )
-
-    session = get_session(state)
-
-    if not session:
-        return error_page(
-            "Session Not Found",
-            "This verification session is invalid or expired."
-        )
-
-    expires = parse_datetime(session.get("expires_at"))
-
-    if expires and expires < now_utc():
-        delete_session(state)
-
-        return error_page(
-            "Session Expired",
-            "Please generate a new file link."
-        )
-
-    # Already consumed.
-    if session.get("used"):
-        return error_page(
-            "Link Already Used",
-            "This file link has already been used."
-        )
-
-    verified = bool(session.get("verified"))
-
-    if verified:
-        return await finish_delivery(
-            request=request,
-            state=state,
-            session=session,
-        )
-
-    # --------------------------------------------------------
-    # Manual verification page.
-    # --------------------------------------------------------
-
-    challenge = random_token(24)
-
-    # Store only hash server-side.
-    update_session(
-        state,
-        {
-            "challenge_hash": sha256(challenge)
-        }
-    )
-
-    return HTMLResponse(
-        verification_page(
-            state=state,
-            challenge=challenge,
-        )
-    )
-
-
-# ============================================================
-# MANUAL VERIFY
-# ============================================================
-
-@app.get("/verify/{state}")
-async def verify_page(
-    request: Request,
-    state: str,
-    challenge: str = Query(default="")
-):
-    """
-    Verification endpoint.
-
-    This endpoint requires:
-      - valid state
-      - valid challenge
-      - browser-generated verification request
-    """
-
-    if not state:
-        return error_page(
-            "Verification Failed",
-            "Please manually verify. Don't try to bypass."
-        )
-
-    session = get_session(state)
-
-    if not session:
-        return error_page(
-            "Verification Failed",
-            "This verification session is invalid."
-        )
-
-    expires = parse_datetime(session.get("expires_at"))
-
-    if expires and expires < now_utc():
-        delete_session(state)
-
-        return error_page(
-            "Session Expired",
-            "Please generate a new link."
-        )
-
-    # --------------------------------------------------------
-    # Challenge verification
-    # --------------------------------------------------------
-
-    if not challenge:
-        return error_page(
-            "Verification Required",
-            "Please manually verify. Don't try to bypass."
-        )
-
-    expected_hash = session.get("challenge_hash")
-
-    if not expected_hash:
-        return error_page(
-            "Verification Failed",
-            "Verification challenge is missing."
-        )
-
-    if not secrets.compare_digest(
-        sha256(challenge),
-        expected_hash
-    ):
-        return error_page(
-            "Verification Failed",
-            "Invalid verification challenge."
-        )
-
-    # --------------------------------------------------------
-    # Mark gateway session verified.
-    # --------------------------------------------------------
-
-    verified_until = now_utc() + timedelta(
-        minutes=VERIFY_MINUTES
-    )
-
-    update_session(
-        state,
-        {
-            "verified": True,
-            "verified_at": iso(now_utc()),
-            "verify_expires_at": iso(verified_until),
-        }
-    )
-
-    # Secure-ish browser cookie.
-    response = RedirectResponse(
-        url=f"{GATEWAY_DOMAIN}/api/complete?"
-            f"{urlencode({'state': state})}",
-        status_code=303,
-    )
-
-    response.set_cookie(
-        key="gateway_verified",
-        value=sha256(state),
-        max_age=VERIFY_MINUTES * 60,
-        httponly=True,
-        secure=True,
-        samesite="lax",
-        path="/",
-    )
-
-    return response
-
-
-# ============================================================
-# FINISH DELIVERY
-# ============================================================
-
-async def finish_delivery(
-    request: Request,
-    state: str,
-    session: dict,
-):
-    """
-    Final Telegram redirect.
-
-    IMPORTANT:
-    We don't mark the original token as used here.
-
-    The Telegram bot should consume it when /start verify_TOKEN
-    is actually received.
-    """
-
-    # --------------------------------------------------------
-    # Verify browser cookie.
-    # --------------------------------------------------------
-
-    cookie = request.cookies.get("gateway_verified")
-
-    expected_cookie = sha256(state)
-
-    if not cookie or not secrets.compare_digest(
-        cookie,
-        expected_cookie
-    ):
-        # No verification cookie.
-        #
-        # Instead of giving the Telegram URL away, send the user
-        # back to manual verification.
-        return HTMLResponse(
-            verification_page(
-                state=state,
-                challenge=random_token(24),
-            )
-        )
-
-    # --------------------------------------------------------
-    # Verify session.
-    # --------------------------------------------------------
-
-    verify_expiry = parse_datetime(
-        session.get("verify_expires_at")
-    )
-
-    if verify_expiry and verify_expiry < now_utc():
-        update_session(
-            state,
-            {
-                "verified": False,
-                "verified_at": None,
-                "verify_expires_at": None,
-            }
-        )
-
-        return error_page(
-            "Verification Expired",
-            "Please manually verify again."
-        )
-
-    token = session.get("token")
-
-    if not token:
-        return error_page(
-            "Invalid Session",
-            "The original file token is missing."
-        )
-
-    original = get_token_record(token)
-
-    if not original:
-        return error_page(
-            "File Not Found",
-            "The original file link no longer exists."
-        )
-
-    # --------------------------------------------------------
-    # Telegram destination.
-    # --------------------------------------------------------
-
-    if not BOT_USERNAME:
-        return error_page(
-            "Gateway Configuration Error",
-            "BOT_USERNAME is missing.",
-            500
-        )
-
-    telegram_url = (
-        f"https://t.me/{BOT_USERNAME}"
-        f"?start=verify_{token}"
-    )
-
-    # --------------------------------------------------------
-    # IMPORTANT:
-    #
-    # Marking this gateway state used is okay because this
-    # particular gateway session is now consumed.
-    #
-    # The original `tokens.used` is NOT changed here.
-    # --------------------------------------------------------
-
-    update_session(
-        state,
-        {
-            "used": True,
-        }
-    )
-
-    response = RedirectResponse(
-        url=telegram_url,
-        status_code=302,
-    )
-
-    # Remove verification cookie after successful handoff.
-    response.delete_cookie(
-        key="gateway_verified",
-        path="/",
-    )
-
-    return response
-
-
-# ============================================================
-# VERIFICATION HTML
-# ============================================================
-
-def verification_page(
-    state: str,
-    challenge: str,
-) -> str:
-
-    safe_state = html.escape(state, quote=True)
-    safe_challenge = html.escape(challenge, quote=True)
-
-    verify_url = (
-        f"{GATEWAY_DOMAIN}/verify/"
-        f"{safe_state}?"
-        f"{urlencode({'challenge': challenge})}"
-    )
-
-    return f"""
-    <!doctype html>
-
+def access_page(target):
+    safe_target = html.escape(target, quote=True)
+
+    content = f"""
+    <!DOCTYPE html>
     <html>
     <head>
-        <meta charset="utf-8">
+        <meta charset="UTF-8">
 
         <meta
             name="viewport"
-            content="width=device-width,initial-scale=1"
+            content="width=device-width, initial-scale=1.0"
         >
 
         <meta
-            name="robots"
-            content="noindex,nofollow,noarchive"
+            http-equiv="refresh"
+            content="1;url={safe_target}"
         >
 
-        <title>Manual Verification</title>
+        <title>Lozo Gateway</title>
 
         <style>
-
             * {{
-                box-sizing:border-box;
+                box-sizing: border-box;
             }}
 
             body {{
-                margin:0;
-                min-height:100vh;
-                display:flex;
-                justify-content:center;
-                align-items:center;
+                margin: 0;
+                min-height: 100vh;
+
+                display: flex;
+                align-items: center;
+                justify-content: center;
 
                 background:
-                    radial-gradient(
-                        circle at top,
-                        #20242d,
-                        #0b0d11 60%
+                    linear-gradient(
+                        135deg,
+                        #020617,
+                        #111827,
+                        #0f172a
                     );
 
-                color:#fff;
-                font-family:
-                    Arial,
-                    Helvetica,
-                    sans-serif;
+                color: white;
 
-                padding:20px;
+                font-family:
+                    -apple-system,
+                    BlinkMacSystemFont,
+                    "Segoe UI",
+                    Roboto,
+                    Arial,
+                    sans-serif;
             }}
 
             .card {{
-                width:100%;
-                max-width:430px;
+                width: calc(100% - 40px);
+                max-width: 430px;
 
-                background:rgba(24,27,34,.96);
+                padding: 34px 25px;
 
-                border:1px solid
-                    rgba(255,255,255,.08);
+                text-align: center;
 
-                border-radius:22px;
+                background: rgba(255,255,255,0.06);
 
-                padding:30px;
+                border:
+                    1px solid
+                    rgba(255,255,255,0.10);
+
+                border-radius: 22px;
 
                 box-shadow:
-                    0 20px 60px
-                    rgba(0,0,0,.45);
-
-                text-align:center;
+                    0 20px 60px rgba(0,0,0,0.45);
             }}
 
-            .shield {{
-                width:72px;
-                height:72px;
+            .loader {{
+                width: 58px;
+                height: 58px;
 
-                display:flex;
-                align-items:center;
-                justify-content:center;
+                margin: 0 auto 22px;
 
-                margin:0 auto 20px;
+                border:
+                    4px solid
+                    rgba(255,255,255,0.15);
 
-                border-radius:50%;
+                border-top-color: white;
 
-                background:#242933;
+                border-radius: 50%;
 
-                font-size:34px;
-            }}
-
-            h1 {{
-                margin:0 0 10px;
-                font-size:24px;
-            }}
-
-            .sub {{
-                margin:0 0 25px;
-                color:#aeb4bf;
-                line-height:1.5;
-            }}
-
-            .verify-box {{
-                display:flex;
-                align-items:center;
-
-                gap:14px;
-
-                padding:18px;
-
-                border-radius:14px;
-
-                background:#11141a;
-
-                border:1px solid
-                    rgba(255,255,255,.08);
-
-                text-align:left;
-
-                cursor:pointer;
-
-                user-select:none;
-            }}
-
-            .checkbox {{
-                width:25px;
-                height:25px;
-
-                border-radius:6px;
-
-                border:2px solid #707784;
-
-                flex:none;
-
-                display:flex;
-                align-items:center;
-                justify-content:center;
-
-                transition:.2s;
-            }}
-
-            .checkbox.checked {{
-                background:#fff;
-                border-color:#fff;
-                color:#111;
-            }}
-
-            .checkbox.checked::after {{
-                content:"✓";
-                font-weight:bold;
-            }}
-
-            .verify-text {{
-                font-size:15px;
-                line-height:1.3;
-            }}
-
-            button {{
-                width:100%;
-
-                margin-top:18px;
-
-                padding:14px 18px;
-
-                border:0;
-                border-radius:12px;
-
-                background:#fff;
-                color:#111;
-
-                font-size:16px;
-                font-weight:bold;
-
-                cursor:pointer;
-
-                opacity:.45;
-
-                pointer-events:none;
-            }}
-
-            button.active {{
-                opacity:1;
-                pointer-events:auto;
-            }}
-
-            .warning {{
-                margin-top:20px;
-
-                color:#858c98;
-
-                font-size:12px;
-                line-height:1.5;
-            }}
-
-            .spinner {{
-                width:18px;
-                height:18px;
-
-                border:2px solid #aaa;
-                border-top-color:#111;
-
-                border-radius:50%;
-
-                display:inline-block;
-
-                animation:spin .8s linear infinite;
-
-                vertical-align:middle;
-
-                margin-right:8px;
+                animation:
+                    spin 0.9s linear infinite;
             }}
 
             @keyframes spin {{
                 to {{
-                    transform:rotate(360deg);
+                    transform: rotate(360deg);
                 }}
             }}
 
+            h1 {{
+                margin: 0 0 10px;
+                font-size: 24px;
+            }}
+
+            p {{
+                margin: 0;
+
+                color: #cbd5e1;
+
+                line-height: 1.6;
+                font-size: 14px;
+            }}
+        </style>
+    </head>
+
+    <body>
+        <div class="card">
+
+            <div class="loader"></div>
+
+            <h1>Lozo Gateway</h1>
+
+            <p>
+                Please wait while we redirect you...
+            </p>
+
+        </div>
+    </body>
+    </html>
+    """
+
+    return HTMLResponse(content=content)
+
+
+# ============================================================
+# VERIFICATION PAGE
+# ============================================================
+
+def verification_page(
+    verify_id,
+    state
+):
+    safe_verify = html.escape(
+        verify_id,
+        quote=True
+    )
+
+    content = f"""
+    <!DOCTYPE html>
+    <html>
+
+    <head>
+        <meta charset="UTF-8">
+
+        <meta
+            name="viewport"
+            content="width=device-width, initial-scale=1.0"
+        >
+
+        <title>Verification</title>
+
+        <style>
+            * {{
+                box-sizing: border-box;
+            }}
+
+            body {{
+                margin: 0;
+                min-height: 100vh;
+
+                display: flex;
+                align-items: center;
+                justify-content: center;
+
+                padding: 20px;
+
+                background:
+                    linear-gradient(
+                        135deg,
+                        #020617,
+                        #111827,
+                        #0f172a
+                    );
+
+                color: #fff;
+
+                font-family:
+                    -apple-system,
+                    BlinkMacSystemFont,
+                    "Segoe UI",
+                    Roboto,
+                    Arial,
+                    sans-serif;
+            }}
+
+            .card {{
+                width: 100%;
+                max-width: 460px;
+
+                padding: 32px 25px;
+
+                text-align: center;
+
+                background:
+                    rgba(255,255,255,0.06);
+
+                border:
+                    1px solid
+                    rgba(255,255,255,0.10);
+
+                border-radius: 22px;
+
+                box-shadow:
+                    0 20px 60px
+                    rgba(0,0,0,0.45);
+            }}
+
+            .icon {{
+                width: 70px;
+                height: 70px;
+
+                margin: 0 auto 20px;
+
+                display: flex;
+                align-items: center;
+                justify-content: center;
+
+                border-radius: 50%;
+
+                background:
+                    rgba(59,130,246,0.15);
+
+                font-size: 32px;
+            }}
+
+            h1 {{
+                margin: 0 0 12px;
+
+                font-size: 25px;
+            }}
+
+            p {{
+                margin: 0 0 25px;
+
+                color: #cbd5e1;
+
+                line-height: 1.6;
+                font-size: 14px;
+            }}
+
+            .button {{
+                display: inline-block;
+
+                padding: 13px 24px;
+
+                border-radius: 12px;
+
+                background: #2563eb;
+
+                color: white;
+
+                text-decoration: none;
+
+                font-weight: 600;
+
+                transition: 0.2s;
+            }}
+
+            .button:hover {{
+                opacity: 0.9;
+            }}
         </style>
     </head>
 
@@ -1151,165 +846,829 @@ def verification_page(
 
         <div class="card">
 
-            <div class="shield">
-                🛡️
+            <div class="icon">
+                ✓
             </div>
 
-            <h1>
-                Manual Verification
-            </h1>
+            <h1>Verification Required</h1>
 
-            <p class="sub">
-                Please manually verify.
-                Don't try to bypass.
+            <p>
+                Complete the verification below to continue.
             </p>
 
-            <div
-                class="verify-box"
-                id="verifyBox"
-                onclick="toggleVerify()"
+            <a
+                class="button"
+                href="/verify/{safe_verify}"
             >
-
-                <div
-                    class="checkbox"
-                    id="checkbox"
-                ></div>
-
-                <div class="verify-text">
-                    I am a human and I want to continue
-                </div>
-
-            </div>
-
-            <button
-                id="continueBtn"
-                onclick="continueVerification()"
-            >
-                Continue
-            </button>
-
-            <div class="warning">
-                This verification session is temporary
-                and can only be used once.
-            </div>
+                Verify & Continue
+            </a>
 
         </div>
-
-
-        <script>
-
-            const state =
-                "{safe_state}";
-
-            const challenge =
-                "{safe_challenge}";
-
-            const verifyUrl =
-                "{verify_url}";
-
-            let checked = false;
-
-
-            function toggleVerify() {{
-
-                checked = !checked;
-
-                const box =
-                    document.getElementById(
-                        "checkbox"
-                    );
-
-                const button =
-                    document.getElementById(
-                        "continueBtn"
-                    );
-
-                if (checked) {{
-
-                    box.classList.add(
-                        "checked"
-                    );
-
-                    button.classList.add(
-                        "active"
-                    );
-
-                }} else {{
-
-                    box.classList.remove(
-                        "checked"
-                    );
-
-                    button.classList.remove(
-                        "active"
-                    );
-
-                }}
-
-            }}
-
-
-            function continueVerification() {{
-
-                if (!checked) {{
-                    return;
-                }}
-
-                const button =
-                    document.getElementById(
-                        "continueBtn"
-                    );
-
-                button.classList.remove(
-                    "active"
-                );
-
-                button.innerHTML =
-                    '<span class="spinner"></span>'
-                    + 'Verifying...';
-
-                /*
-                 * Small delay makes accidental automatic
-                 * navigation less likely.
-                 */
-
-                setTimeout(function() {{
-
-                    window.location.href =
-                        verifyUrl;
-
-                }}, 900);
-
-            }}
-
-        </script>
 
     </body>
     </html>
     """
 
+    return HTMLResponse(content=content)
+
 
 # ============================================================
-# DEBUG / INFO
+# ROOT
+# ============================================================
+
+@app.get("/", response_class=HTMLResponse)
+async def root():
+    return HTMLResponse(
+        """
+        <!DOCTYPE html>
+        <html>
+
+        <head>
+            <meta charset="UTF-8">
+
+            <meta
+                name="viewport"
+                content="width=device-width, initial-scale=1.0"
+            >
+
+            <title>Lozo Gateway</title>
+
+            <style>
+                * {
+                    box-sizing: border-box;
+                }
+
+                body {
+                    margin: 0;
+                    min-height: 100vh;
+
+                    display: flex;
+                    align-items: center;
+                    justify-content: center;
+
+                    padding: 20px;
+
+                    background:
+                        linear-gradient(
+                            135deg,
+                            #020617,
+                            #111827,
+                            #0f172a
+                        );
+
+                    color: white;
+
+                    font-family:
+                        -apple-system,
+                        BlinkMacSystemFont,
+                        "Segoe UI",
+                        Roboto,
+                        Arial,
+                        sans-serif;
+                }
+
+                .card {
+                    width: 100%;
+                    max-width: 460px;
+
+                    padding: 36px 25px;
+
+                    text-align: center;
+
+                    background:
+                        rgba(255,255,255,0.06);
+
+                    border:
+                        1px solid
+                        rgba(255,255,255,0.10);
+
+                    border-radius: 22px;
+
+                    box-shadow:
+                        0 20px 60px
+                        rgba(0,0,0,0.45);
+                }
+
+                h1 {
+                    margin: 0 0 12px;
+                    font-size: 28px;
+                }
+
+                p {
+                    margin: 0;
+
+                    color: #cbd5e1;
+
+                    line-height: 1.7;
+                    font-size: 15px;
+                }
+            </style>
+        </head>
+
+        <body>
+
+            <div class="card">
+
+                <h1>Lozo Gateway</h1>
+
+                <p>
+                    Secure gateway is active.
+                </p>
+
+            </div>
+
+        </body>
+
+        </html>
+        """
+    )
+
+
+# ============================================================
+# HEALTH
+# ============================================================
+
+@app.get("/health")
+async def health():
+    return {
+        "ok": True,
+        "service": "lozo-gateway"
+    }
+
+
+# ============================================================
+# ORIGINAL GATEWAY
+# ============================================================
+
+@app.get("/api/gateway")
+async def gateway(
+    request: Request,
+    token: str = Query(...)
+):
+
+    token = token.strip()
+
+    if not token:
+        return error_page(
+            "Invalid Link",
+            "The requested gateway link is invalid."
+        )
+
+    if not db_ready():
+        return error_page(
+            "Service Unavailable",
+            "The gateway database is currently unavailable."
+        )
+
+    if not BOT_USERNAME:
+        return error_page(
+            "Configuration Error",
+            "The Telegram bot username is not configured."
+        )
+
+    # --------------------------------------------------------
+    # Check original token
+    # --------------------------------------------------------
+
+    token_record = get_token_record(token)
+
+    if not token_record:
+        return error_page(
+            "Invalid Link",
+            "The requested gateway link is invalid or no longer available."
+        )
+
+    # --------------------------------------------------------
+    # Check original token expiry
+    # --------------------------------------------------------
+
+    token_expires = (
+        token_record.get("expires_at")
+        or token_record.get("expire_at")
+        or token_record.get("expires")
+    )
+
+    if token_expires and is_expired(token_expires):
+        return error_page(
+            "Link Expired",
+            EXPIRED_MESSAGE
+        )
+
+    # --------------------------------------------------------
+    # NEW ONE-TIME ENTRY CHECK
+    #
+    # The original:
+    #
+    # /api/gateway?token=XXXX
+    #
+    # can only create one gateway session.
+    #
+    # This check is intentionally BEFORE creating a new state.
+    # --------------------------------------------------------
+
+    if token_entry_used(token):
+
+        return error_page(
+            "Link Expired",
+            EXPIRED_MESSAGE
+        )
+
+    # --------------------------------------------------------
+    # Create browser binding
+    # --------------------------------------------------------
+
+    browser_id = request.cookies.get("lozo_browser_id")
+
+    if not browser_id:
+        browser_id = random_id(24)
+
+    browser_hash = sha256(browser_id)
+
+    # --------------------------------------------------------
+    # Create gateway state
+    # --------------------------------------------------------
+
+    access_id = random_id(24)
+
+    expires_at = (
+        now_utc()
+        + timedelta(minutes=SESSION_MINUTES)
+    )
+
+    saved = save_session(
+        access_id,
+        token,
+        expires_at,
+        browser_hash
+    )
+
+    if not saved:
+        return error_page(
+            "Unable to Create Session",
+            "Unable to create a secure gateway session. Please try again."
+        )
+
+    # --------------------------------------------------------
+    # VPLink destination
+    # --------------------------------------------------------
+
+    complete_url = (
+        f"{GATEWAY_DOMAIN}/api/complete?"
+        f"{urlencode({'state': access_id})}"
+    )
+
+    vplink_url = create_vplink(
+        complete_url
+    )
+
+    if not vplink_url:
+        # Remove the session so a failed VPLink creation
+        # does not permanently consume the original token.
+        delete_session(access_id)
+
+        return error_page(
+            "Gateway Error",
+            "Unable to create the gateway link. Please try again."
+        )
+
+    # --------------------------------------------------------
+    # Save VPLink target
+    # --------------------------------------------------------
+
+    update_session(
+        access_id,
+        {
+            "target": vplink_url
+        }
+    )
+
+    # --------------------------------------------------------
+    # Redirect to access page
+    # --------------------------------------------------------
+
+    response = RedirectResponse(
+        url=f"/access/{access_id}",
+        status_code=302
+    )
+
+    response.set_cookie(
+        key=ACCESS_COOKIE,
+        value=access_id,
+        max_age=SESSION_MINUTES * 60,
+        httponly=True,
+        secure=True,
+        samesite="lax"
+    )
+
+    response.set_cookie(
+        key="lozo_browser_id",
+        value=browser_id,
+        max_age=60 * 60 * 24 * 30,
+        httponly=True,
+        secure=True,
+        samesite="lax"
+    )
+
+    response.set_cookie(
+        key="lozo_vplink",
+        value=vplink_url,
+        max_age=SESSION_MINUTES * 60,
+        httponly=True,
+        secure=True,
+        samesite="lax"
+    )
+
+    return response
+
+
+# ============================================================
+# ACCESS
+# ============================================================
+
+@app.get("/access/{access_id}")
+async def access(
+    request: Request,
+    access_id: str
+):
+
+    session = get_session(access_id)
+
+    if not session:
+        return error_page(
+            "Session Expired",
+            EXPIRED_MESSAGE
+        )
+
+    if session.get("used"):
+        return error_page(
+            "Session Expired",
+            EXPIRED_MESSAGE
+        )
+
+    if is_expired(session.get("expires_at")):
+        return error_page(
+            "Session Expired",
+            EXPIRED_MESSAGE
+        )
+
+    browser_id = request.cookies.get(
+        "lozo_browser_id"
+    )
+
+    if not browser_id:
+        return error_page(
+            "Invalid Session",
+            "This session belongs to another browser session."
+        )
+
+    browser_hash = sha256(browser_id)
+
+    if session.get("browser_hash") != browser_hash:
+        return error_page(
+            "Invalid Session",
+            "This session belongs to another browser session."
+        )
+
+    target = session.get("target")
+
+    if not target:
+        return error_page(
+            "Gateway Error",
+            "The gateway destination is unavailable."
+        )
+
+    return access_page(target)
+
+
+# ============================================================
+# VPLink COMPLETE
+# ============================================================
+
+@app.get("/api/complete")
+async def complete(
+    request: Request,
+    state: str = Query(...)
+):
+
+    session = get_session(state)
+
+    if not session:
+        return error_page(
+            "Session Expired",
+            EXPIRED_MESSAGE
+        )
+
+    if session.get("used"):
+        return error_page(
+            "Session Expired",
+            EXPIRED_MESSAGE
+        )
+
+    if is_expired(session.get("expires_at")):
+        return error_page(
+            "Session Expired",
+            EXPIRED_MESSAGE
+        )
+
+    # --------------------------------------------------------
+    # Browser binding
+    # --------------------------------------------------------
+
+    browser_id = request.cookies.get(
+        "lozo_browser_id"
+    )
+
+    if not browser_id:
+        return error_page(
+            "Invalid Session",
+            "This session belongs to another browser session."
+        )
+
+    browser_hash = sha256(browser_id)
+
+    if session.get("browser_hash") != browser_hash:
+        return error_page(
+            "Invalid Session",
+            "This session belongs to another browser session."
+        )
+
+    # --------------------------------------------------------
+    # Already verified?
+    # --------------------------------------------------------
+
+    if session.get("verified"):
+
+        response = RedirectResponse(
+            url=f"/api/deliver?state={state}",
+            status_code=302
+        )
+
+        return response
+
+    # --------------------------------------------------------
+    # Create verification challenge
+    # --------------------------------------------------------
+
+    verify_id = random_id(24)
+
+    verify_expires_at = (
+        now_utc()
+        + timedelta(minutes=VERIFY_MINUTES)
+    )
+
+    updated = update_session(
+        state,
+        {
+            "challenge_hash": sha256(verify_id),
+            "verify_expires_at": iso(
+                verify_expires_at
+            )
+        }
+    )
+
+    if not updated:
+        return error_page(
+            "Verification Error",
+            "Unable to create the verification session."
+        )
+
+    return verification_page(
+        verify_id,
+        state
+    )
+
+
+# ============================================================
+# VERIFY
+# ============================================================
+
+@app.get("/verify/{verify_id}")
+async def verify(
+    request: Request,
+    verify_id: str
+):
+
+    session = get_session_by_verify_id(
+        verify_id
+    )
+
+    if not session:
+        return error_page(
+            "Verification Expired",
+            EXPIRED_MESSAGE
+        )
+
+    state = session.get("state")
+
+    if not state:
+        return error_page(
+            "Verification Error",
+            "Invalid verification session."
+        )
+
+    if session.get("used"):
+        return error_page(
+            "Session Expired",
+            EXPIRED_MESSAGE
+        )
+
+    if is_expired(session.get("expires_at")):
+        return error_page(
+            "Session Expired",
+            EXPIRED_MESSAGE
+        )
+
+    # --------------------------------------------------------
+    # Browser check
+    # --------------------------------------------------------
+
+    browser_id = request.cookies.get(
+        "lozo_browser_id"
+    )
+
+    if not browser_id:
+        return error_page(
+            "Invalid Session",
+            "This session belongs to another browser session."
+        )
+
+    browser_hash = sha256(browser_id)
+
+    if session.get("browser_hash") != browser_hash:
+        return error_page(
+            "Invalid Session",
+            "This session belongs to another browser session."
+        )
+
+    # --------------------------------------------------------
+    # Verify challenge
+    # --------------------------------------------------------
+
+    if session.get("challenge_hash") != sha256(
+        verify_id
+    ):
+        return error_page(
+            "Invalid Verification",
+            "The verification request is invalid."
+        )
+
+    # --------------------------------------------------------
+    # Verification expiry
+    # --------------------------------------------------------
+
+    verify_expires_at = session.get(
+        "verify_expires_at"
+    )
+
+    if (
+        not verify_expires_at
+        or is_expired(verify_expires_at)
+    ):
+        return error_page(
+            "Verification Expired",
+            "The verification session has expired. Please start again."
+        )
+
+    # --------------------------------------------------------
+    # Mark verified
+    # --------------------------------------------------------
+
+    verified_at = now_utc()
+
+    updated = update_session(
+        state,
+        {
+            "verified": True,
+            "verified_at": iso(verified_at)
+        }
+    )
+
+    if not updated:
+        return error_page(
+            "Verification Error",
+            "Unable to save verification. Please try again."
+        )
+
+    # --------------------------------------------------------
+    # Verification cookie
+    # --------------------------------------------------------
+
+    response = RedirectResponse(
+        url=f"/api/deliver?state={state}",
+        status_code=302
+    )
+
+    response.set_cookie(
+        key=VERIFY_COOKIE,
+        value=state,
+        max_age=VERIFY_MINUTES * 60,
+        httponly=True,
+        secure=True,
+        samesite="lax"
+    )
+
+    return response
+
+
+# ============================================================
+# FINAL DELIVERY
+# ============================================================
+
+@app.get("/api/deliver")
+async def deliver(
+    request: Request,
+    state: str = Query(...)
+):
+
+    session = get_session(state)
+
+    if not session:
+        return error_page(
+            "Session Expired",
+            EXPIRED_MESSAGE
+        )
+
+    # --------------------------------------------------------
+    # Session state
+    # --------------------------------------------------------
+
+    if session.get("used"):
+        return error_page(
+            "Session Expired",
+            EXPIRED_MESSAGE
+        )
+
+    if is_expired(session.get("expires_at")):
+        return error_page(
+            "Session Expired",
+            EXPIRED_MESSAGE
+        )
+
+    # --------------------------------------------------------
+    # Browser binding
+    # --------------------------------------------------------
+
+    browser_id = request.cookies.get(
+        "lozo_browser_id"
+    )
+
+    if not browser_id:
+        return error_page(
+            "Invalid Session",
+            "This session belongs to another browser session."
+        )
+
+    browser_hash = sha256(browser_id)
+
+    if session.get("browser_hash") != browser_hash:
+        return error_page(
+            "Invalid Session",
+            "This session belongs to another browser session."
+        )
+
+    # --------------------------------------------------------
+    # Verification cookie
+    # --------------------------------------------------------
+
+    verified_cookie = request.cookies.get(
+        VERIFY_COOKIE
+    )
+
+    if verified_cookie != state:
+        return error_page(
+            "Verification Required",
+            "Please complete the verification before continuing."
+        )
+
+    # --------------------------------------------------------
+    # Verification state
+    # --------------------------------------------------------
+
+    if not session.get("verified"):
+        return error_page(
+            "Verification Required",
+            "Please complete the verification before continuing."
+        )
+
+    verify_expires_at = session.get(
+        "verify_expires_at"
+    )
+
+    if (
+        not verify_expires_at
+        or is_expired(verify_expires_at)
+    ):
+        return error_page(
+            "Verification Expired",
+            "The verification session has expired. Please start again."
+        )
+
+    # --------------------------------------------------------
+    # Original token
+    # --------------------------------------------------------
+
+    original_token = session.get(
+        "token"
+    )
+
+    if not original_token:
+        return error_page(
+            "Invalid Session",
+            "The original gateway token could not be found."
+        )
+
+    token_record = get_token_record(
+        original_token
+    )
+
+    if not token_record:
+        return error_page(
+            "Link Expired",
+            EXPIRED_MESSAGE
+        )
+
+    # --------------------------------------------------------
+    # Original token expiry
+    # --------------------------------------------------------
+
+    token_expires = (
+        token_record.get("expires_at")
+        or token_record.get("expire_at")
+        or token_record.get("expires")
+    )
+
+    if token_expires and is_expired(
+        token_expires
+    ):
+        return error_page(
+            "Link Expired",
+            EXPIRED_MESSAGE
+        )
+
+    # --------------------------------------------------------
+    # Telegram destination
+    # --------------------------------------------------------
+
+    telegram_url = (
+        f"https://t.me/{BOT_USERNAME}"
+        f"?start=verify_{original_token}"
+    )
+
+    # --------------------------------------------------------
+    # Mark final gateway session as used
+    #
+    # NOTE:
+    # This is different from entry_used.
+    #
+    # entry_used = original gateway URL consumed
+    # used       = final delivery completed
+    # --------------------------------------------------------
+
+    updated = update_session(
+        state,
+        {
+            "used": True
+        }
+    )
+
+    if not updated:
+        return error_page(
+            "Delivery Error",
+            "Unable to complete the gateway session. Please try again."
+        )
+
+    # --------------------------------------------------------
+    # Redirect to Telegram
+    # --------------------------------------------------------
+
+    response = RedirectResponse(
+        url=telegram_url,
+        status_code=302
+    )
+
+    response.delete_cookie(
+        ACCESS_COOKIE
+    )
+
+    response.delete_cookie(
+        VERIFY_COOKIE
+    )
+
+    response.delete_cookie(
+        "lozo_vplink"
+    )
+
+    return response
+
+
+# ============================================================
+# SESSION DEBUG
 # ============================================================
 
 @app.get("/api/session")
 async def session_info(
-    state: str = Query(default="")
+    state: str = Query(...)
 ):
-    """
-    Safe diagnostic endpoint.
-    Does NOT return original Telegram target/token.
-    """
-
-    if not state:
-        return JSONResponse(
-            {
-                "ok": False,
-                "error": "missing_state",
-            },
-            status_code=400,
-        )
 
     session = get_session(state)
 
@@ -1317,25 +1676,21 @@ async def session_info(
         return JSONResponse(
             {
                 "ok": False,
-                "error": "not_found",
+                "error": "session_not_found"
             },
-            status_code=404,
+            status_code=404
         )
-
-    expires = parse_datetime(
-        session.get("expires_at")
-    )
 
     return {
         "ok": True,
-        "exists": True,
-        "expired": bool(
-            expires and expires < now_utc()
-        ),
-        "verified": bool(
-            session.get("verified")
-        ),
-        "used": bool(
-            session.get("used")
+        "state": session.get("state"),
+        "token": session.get("token"),
+        "expires_at": session.get("expires_at"),
+        "used": session.get("used"),
+        "entry_used": session.get("entry_used"),
+        "verified": session.get("verified"),
+        "verified_at": session.get("verified_at"),
+        "verify_expires_at": session.get(
+            "verify_expires_at"
         ),
     }
