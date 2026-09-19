@@ -1,3 +1,6 @@
-fastapi
-supabase
-requests
+python-telegram-bot>=22,<23
+python-dotenv>=1.0
+pymongo[srv]>=4.10
+fastapi>=0.115
+requests>=2.32
+uvicorn>=0.30
