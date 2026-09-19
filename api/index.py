@@ -8,17 +8,15 @@ from urllib.parse import urlencode
 import requests
 from fastapi import FastAPI, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
-from supabase import create_client
+from pymongo import MongoClient, ASCENDING
 
 
 # ============================================================
 # CONFIG
 # ============================================================
 
-SUPABASE_URL = os.getenv("SUPABASE_URL", "").strip()
-SUPABASE_SERVICE_ROLE_KEY = os.getenv(
-    "SUPABASE_SERVICE_ROLE_KEY", ""
-).strip()
+MONGO_URI = os.getenv("MONGO_URI", "").strip()
+MONGO_DB = os.getenv("MONGO_DB", "file_store_bot").strip() or "file_store_bot"
 
 BOT_USERNAME = os.getenv("BOT_USERNAME", "").strip().lstrip("@")
 
@@ -47,21 +45,25 @@ VERIFY_MINUTES = int(
 
 
 # ============================================================
-# APP / SUPABASE
+# APP / MONGODB
 # ============================================================
 
 app = FastAPI()
 
-supabase = None
+mongo = None
+db = None
 
-if SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY:
+if MONGO_URI:
     try:
-        supabase = create_client(
-            SUPABASE_URL,
-            SUPABASE_SERVICE_ROLE_KEY
-        )
+        mongo = MongoClient(MONGO_URI, serverSelectionTimeoutMS=10000)
+        db = mongo[MONGO_DB]
+        db.tokens.create_index([("token", ASCENDING)], unique=True)
+        db.gateway_states.create_index([("state", ASCENDING)], unique=True)
+        db.gateway_states.create_index([("token", ASCENDING)], unique=True)
+        db.gateway_states.create_index([("challenge_hash", ASCENDING)], unique=True, sparse=True)
     except Exception:
-        supabase = None
+        mongo = None
+        db = None
 
 
 # ============================================================
@@ -94,169 +96,33 @@ def random_id(length=32):
 
 
 def sha256(value):
-    return hashlib.sha256(
-        value.encode("utf-8")
-    ).hexdigest()
+    return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
 def db_ready():
-    return supabase is not None
+    return db is not None
 
 
 def parse_datetime(value):
     if not value:
         return None
-
     try:
         if isinstance(value, datetime):
             dt = value
         else:
-            dt = datetime.fromisoformat(
-                str(value).replace("Z", "+00:00")
-            )
-
+            dt = datetime.fromisoformat(str(value).replace("Z", "+00:00"))
         if dt.tzinfo is None:
             dt = dt.replace(tzinfo=timezone.utc)
-
         return dt.astimezone(timezone.utc)
-
     except Exception:
         return None
 
 
 def is_expired(value):
     dt = parse_datetime(value)
-
     if dt is None:
         return True
-
     return dt <= now_utc()
-
-
-# ============================================================
-# HTML
-# ============================================================
-
-def error_page(title, message):
-    safe_title = html.escape(title)
-    safe_message = html.escape(message)
-
-    content = f"""
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport"
-              content="width=device-width, initial-scale=1.0">
-
-        <title>{safe_title}</title>
-
-        <style>
-            * {{
-                box-sizing: border-box;
-            }}
-
-            body {{
-                margin: 0;
-                min-height: 100vh;
-                display: flex;
-                align-items: center;
-                justify-content: center;
-                padding: 20px;
-
-                font-family:
-                    -apple-system,
-                    BlinkMacSystemFont,
-                    "Segoe UI",
-                    Roboto,
-                    Arial,
-                    sans-serif;
-
-                background:
-                    linear-gradient(
-                        135deg,
-                        #0f172a,
-                        #111827,
-                        #020617
-                    );
-
-                color: #ffffff;
-            }}
-
-            .card {{
-                width: 100%;
-                max-width: 470px;
-
-                padding: 34px 26px;
-
-                text-align: center;
-
-                background: rgba(255,255,255,0.06);
-                border: 1px solid rgba(255,255,255,0.10);
-
-                border-radius: 22px;
-
-                box-shadow:
-                    0 20px 60px rgba(0,0,0,0.45);
-
-                backdrop-filter: blur(14px);
-            }}
-
-            .icon {{
-                width: 72px;
-                height: 72px;
-
-                margin: 0 auto 20px;
-
-                display: flex;
-                align-items: center;
-                justify-content: center;
-
-                border-radius: 50%;
-
-                background: rgba(239,68,68,0.15);
-
-                font-size: 34px;
-            }}
-
-            h1 {{
-                margin: 0 0 14px;
-
-                font-size: 25px;
-                font-weight: 700;
-            }}
-
-            p {{
-                margin: 0;
-
-                color: #cbd5e1;
-
-                font-size: 15px;
-                line-height: 1.7;
-            }}
-        </style>
-    </head>
-
-    <body>
-        <div class="card">
-
-            <div class="icon">
-                ⏳
-            </div>
-
-            <h1>{safe_title}</h1>
-
-            <p>{safe_message}</p>
-
-        </div>
-    </body>
-    </html>
-    """
-
-    return HTMLResponse(
-        content=content,
-        status_code=410
-    )
 
 
 # ============================================================
@@ -266,58 +132,17 @@ def error_page(title, message):
 def get_token_record(token):
     if not db_ready():
         return None
-
     try:
-        response = (
-            supabase
-            .table("tokens")
-            .select("*")
-            .eq("token", token)
-            .limit(1)
-            .execute()
-        )
-
-        if response.data:
-            return response.data[0]
-
+        return db.tokens.find_one({"token": token}, {"_id": 0})
     except Exception:
         return None
 
-    return None
-
-
-# ============================================================
-# ONE-TIME ORIGINAL GATEWAY ENTRY
-# ============================================================
 
 def token_entry_used(token):
-    """
-    Checks whether this original bot gateway token has already
-    been entered once.
-
-    `entry_used` is intentionally separate from `used`.
-
-    entry_used = original /api/gateway URL has already been opened
-    used       = final gateway session has delivered the Telegram
-                 handoff
-    """
-
     if not db_ready():
         return False
-
     try:
-        response = (
-            supabase
-            .table("gateway_states")
-            .select("state")
-            .eq("token", token)
-            .eq("entry_used", True)
-            .limit(1)
-            .execute()
-        )
-
-        return bool(response.data)
-
+        return db.gateway_states.find_one({"token": token, "entry_used": True}, {"_id": 1}) is not None
     except Exception:
         return False
 
@@ -329,87 +154,39 @@ def token_entry_used(token):
 def get_session(state):
     if not db_ready():
         return None
-
     try:
-        response = (
-            supabase
-            .table("gateway_states")
-            .select("*")
-            .eq("state", state)
-            .limit(1)
-            .execute()
-        )
-
-        if response.data:
-            return response.data[0]
-
+        return db.gateway_states.find_one({"state": state}, {"_id": 0})
     except Exception:
         return None
-
-    return None
 
 
 def get_session_by_verify_id(verify_id):
     if not db_ready():
         return None
-
     try:
-        response = (
-            supabase
-            .table("gateway_states")
-            .select("*")
-            .eq("challenge_hash", sha256(verify_id))
-            .limit(1)
-            .execute()
-        )
-
-        if response.data:
-            return response.data[0]
-
+        return db.gateway_states.find_one({"challenge_hash": sha256(verify_id)}, {"_id": 0})
     except Exception:
         return None
 
-    return None
 
-
-def save_session(
-    state,
-    token,
-    expires_at,
-    browser_hash
-):
+def save_session(state, token, expires_at, browser_hash):
     if not db_ready():
         return False
-
+    payload = {
+        "state": state,
+        "token": token,
+        "expires_at": expires_at,
+        "used": False,
+        "entry_used": True,
+        "challenge_hash": None,
+        "verified": False,
+        "verified_at": None,
+        "verify_expires_at": None,
+        "browser_hash": browser_hash,
+    }
     try:
-        payload = {
-            "state": state,
-            "token": token,
-            "expires_at": iso(expires_at),
-
-            # Final delivery state
-            "used": False,
-
-            # NEW:
-            # Original /api/gateway entry is consumed
-            # immediately on first successful gateway creation.
-            "entry_used": True,
-
-            "challenge_hash": None,
-            "verified": False,
-            "verified_at": None,
-            "verify_expires_at": None,
-
-            "browser_hash": browser_hash,
-        }
-
-        supabase \
-            .table("gateway_states") \
-            .insert(payload) \
-            .execute()
-
+        db.gateway_states.insert_one(payload)
         return True
-
     except Exception:
         return False
 
@@ -417,18 +194,9 @@ def save_session(
 def update_session(state, values):
     if not db_ready():
         return False
-
     try:
-        (
-            supabase
-            .table("gateway_states")
-            .update(values)
-            .eq("state", state)
-            .execute()
-        )
-
-        return True
-
+        result = db.gateway_states.update_one({"state": state}, {"$set": values})
+        return result.matched_count > 0
     except Exception:
         return False
 
@@ -436,23 +204,13 @@ def update_session(state, values):
 def delete_session(state):
     if not db_ready():
         return False
-
     try:
-        (
-            supabase
-            .table("gateway_states")
-            .delete()
-            .eq("state", state)
-            .execute()
-        )
-
+        db.gateway_states.delete_one({"state": state})
         return True
-
     except Exception:
         return False
 
 
-# ============================================================
 # VPLink
 # ============================================================
 
