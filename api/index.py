@@ -43,10 +43,7 @@ VPLINK_API_URL = (
 )
 
 VPLINK_API_KEY = (
-    os.getenv(
-        "VPLINK_API_KEY",
-        ""
-    ).strip()
+    os.getenv("VPLINK_API_KEY", "").strip()
 )
 
 GATEWAY_DOMAIN = (
@@ -56,17 +53,23 @@ GATEWAY_DOMAIN = (
     ).strip().rstrip("/")
 )
 
-SESSION_MINUTES = int(
-    os.getenv("SESSION_MINUTES", "30")
-)
+try:
+    SESSION_MINUTES = int(
+        os.getenv("SESSION_MINUTES", "30")
+    )
+except Exception:
+    SESSION_MINUTES = 30
 
-VERIFY_MINUTES = int(
-    os.getenv("VERIFY_MINUTES", "10")
-)
+try:
+    VERIFY_MINUTES = int(
+        os.getenv("VERIFY_MINUTES", "10")
+    )
+except Exception:
+    VERIFY_MINUTES = 10
 
 
 # ============================================================
-# APP / MONGODB
+# APP / DATABASE
 # ============================================================
 
 app = FastAPI()
@@ -76,6 +79,15 @@ db = None
 
 
 def initialize_database():
+    """
+    Connect to MongoDB and make sure required indexes exist.
+
+    IMPORTANT:
+    An old gateway_states.token_1 index may already exist as
+    UNIQUE. The current gateway requires this index to be
+    NON-UNIQUE, so we safely remove the conflicting old index.
+    """
+
     global mongo, db
 
     if not MONGO_URI:
@@ -90,46 +102,195 @@ def initialize_database():
             socketTimeoutMS=10000,
         )
 
-        # Force connection test.
+        # Force MongoDB connection test.
         mongo.admin.command("ping")
 
         db = mongo[MONGO_DB]
 
         # ----------------------------------------------------
-        # Indexes
+        # TOKENS
+        #
+        # Original token itself should remain unique.
         # ----------------------------------------------------
 
-        db.tokens.create_index(
-            [("token", ASCENDING)],
-            unique=True
+        tokens_indexes = list(
+            db.tokens.list_indexes()
         )
 
-        db.gateway_states.create_index(
-            [("state", ASCENDING)],
-            unique=True
+        token_index = next(
+            (
+                index
+                for index in tokens_indexes
+                if index.get("key") == {"token": 1}
+            ),
+            None
         )
 
-        # IMPORTANT:
-        # token must NOT be unique here because old/failed
-        # sessions may already exist for the same token.
-        db.gateway_states.create_index(
-            [("token", ASCENDING)]
+        if token_index:
+            if token_index.get("unique") is not True:
+                db.tokens.drop_index(
+                    token_index["name"]
+                )
+
+                db.tokens.create_index(
+                    [("token", ASCENDING)],
+                    name="token_1",
+                    unique=True
+                )
+        else:
+            db.tokens.create_index(
+                [("token", ASCENDING)],
+                name="token_1",
+                unique=True
+            )
+
+        # ----------------------------------------------------
+        # GATEWAY STATES
+        #
+        # state = unique
+        # token = NON-unique
+        # challenge_hash = unique/sparse
+        # ----------------------------------------------------
+
+        gateway_indexes = list(
+            db.gateway_states.list_indexes()
         )
 
-        db.gateway_states.create_index(
-            [("challenge_hash", ASCENDING)],
-            unique=True,
-            sparse=True
+        # state index
+        state_index = next(
+            (
+                index
+                for index in gateway_indexes
+                if index.get("key") == {"state": 1}
+            ),
+            None
         )
+
+        if state_index:
+            if state_index.get("unique") is not True:
+                db.gateway_states.drop_index(
+                    state_index["name"]
+                )
+
+                db.gateway_states.create_index(
+                    [("state", ASCENDING)],
+                    name="state_1",
+                    unique=True
+                )
+        else:
+            db.gateway_states.create_index(
+                [("state", ASCENDING)],
+                name="state_1",
+                unique=True
+            )
+
+        # ----------------------------------------------------
+        # TOKEN INDEX
+        #
+        # VERY IMPORTANT:
+        # Old version may have created:
+        #
+        # token_1 -> unique=True
+        #
+        # Drop it and recreate as non-unique.
+        # ----------------------------------------------------
+
+        gateway_indexes = list(
+            db.gateway_states.list_indexes()
+        )
+
+        token_state_index = next(
+            (
+                index
+                for index in gateway_indexes
+                if index.get("key") == {"token": 1}
+            ),
+            None
+        )
+
+        if token_state_index:
+
+            if token_state_index.get("unique") is True:
+
+                logger.warning(
+                    "Removing old UNIQUE gateway_states token index: %s",
+                    token_state_index["name"]
+                )
+
+                db.gateway_states.drop_index(
+                    token_state_index["name"]
+                )
+
+                db.gateway_states.create_index(
+                    [("token", ASCENDING)],
+                    name="token_1",
+                    unique=False
+                )
+
+            else:
+                # Already correct.
+                logger.info(
+                    "gateway_states token index already non-unique."
+                )
+
+        else:
+            db.gateway_states.create_index(
+                [("token", ASCENDING)],
+                name="token_1",
+                unique=False
+            )
+
+        # ----------------------------------------------------
+        # CHALLENGE HASH
+        # ----------------------------------------------------
+
+        gateway_indexes = list(
+            db.gateway_states.list_indexes()
+        )
+
+        challenge_index = next(
+            (
+                index
+                for index in gateway_indexes
+                if index.get("key") == {"challenge_hash": 1}
+            ),
+            None
+        )
+
+        if challenge_index:
+            if challenge_index.get("unique") is not True:
+
+                db.gateway_states.drop_index(
+                    challenge_index["name"]
+                )
+
+                db.gateway_states.create_index(
+                    [("challenge_hash", ASCENDING)],
+                    name="challenge_hash_1",
+                    unique=True,
+                    sparse=True
+                )
+        else:
+            db.gateway_states.create_index(
+                [("challenge_hash", ASCENDING)],
+                name="challenge_hash_1",
+                unique=True,
+                sparse=True
+            )
 
         logger.info(
             "MongoDB connected successfully: %s",
             MONGO_DB
         )
 
+        logger.info(
+            "MongoDB indexes verified successfully."
+        )
+
         return True
 
     except Exception as e:
+
         logger.exception(
             "MongoDB initialization failed: %s",
             e
@@ -186,15 +347,21 @@ def db_ready():
 
 
 def parse_datetime(value):
+
     if not value:
         return None
 
     try:
+
         if isinstance(value, datetime):
             dt = value
+
         else:
             dt = datetime.fromisoformat(
-                str(value).replace("Z", "+00:00")
+                str(value).replace(
+                    "Z",
+                    "+00:00"
+                )
             )
 
         if dt.tzinfo is None:
@@ -202,13 +369,16 @@ def parse_datetime(value):
                 tzinfo=timezone.utc
             )
 
-        return dt.astimezone(timezone.utc)
+        return dt.astimezone(
+            timezone.utc
+        )
 
     except Exception:
         return None
 
 
 def is_expired(value):
+
     dt = parse_datetime(value)
 
     if dt is None:
@@ -222,150 +392,117 @@ def is_expired(value):
 # ============================================================
 
 def error_page(title, message):
-    safe_title = html.escape(str(title))
-    safe_message = html.escape(str(message))
 
-    content = f"""
-    <!DOCTYPE html>
-    <html>
+    safe_title = html.escape(
+        str(title)
+    )
 
-    <head>
-        <meta charset="UTF-8">
-
-        <meta
-            name="viewport"
-            content="width=device-width, initial-scale=1.0"
-        >
-
-        <title>{safe_title} - Lozo Gateway</title>
-
-        <style>
-            * {{
-                box-sizing: border-box;
-            }}
-
-            body {{
-                margin: 0;
-                min-height: 100vh;
-
-                display: flex;
-                align-items: center;
-                justify-content: center;
-
-                padding: 20px;
-
-                background:
-                    linear-gradient(
-                        135deg,
-                        #020617,
-                        #111827,
-                        #0f172a
-                    );
-
-                color: white;
-
-                font-family:
-                    -apple-system,
-                    BlinkMacSystemFont,
-                    "Segoe UI",
-                    Roboto,
-                    Arial,
-                    sans-serif;
-            }}
-
-            .card {{
-                width: 100%;
-                max-width: 460px;
-
-                padding: 34px 25px;
-
-                text-align: center;
-
-                background:
-                    rgba(255,255,255,0.06);
-
-                border:
-                    1px solid
-                    rgba(255,255,255,0.10);
-
-                border-radius: 22px;
-
-                box-shadow:
-                    0 20px 60px
-                    rgba(0,0,0,0.45);
-            }}
-
-            .icon {{
-                width: 70px;
-                height: 70px;
-
-                margin: 0 auto 20px;
-
-                display: flex;
-                align-items: center;
-                justify-content: center;
-
-                border-radius: 50%;
-
-                background:
-                    rgba(239,68,68,0.15);
-
-                color: #f87171;
-
-                font-size: 32px;
-                font-weight: 700;
-            }}
-
-            h1 {{
-                margin: 0 0 12px;
-                font-size: 25px;
-            }}
-
-            p {{
-                margin: 0;
-
-                color: #cbd5e1;
-
-                line-height: 1.6;
-                font-size: 14px;
-            }}
-
-            .brand {{
-                margin-top: 24px;
-
-                color: #64748b;
-
-                font-size: 12px;
-            }}
-        </style>
-    </head>
-
-    <body>
-
-        <div class="card">
-
-            <div class="icon">
-                !
-            </div>
-
-            <h1>{safe_title}</h1>
-
-            <p>
-                {safe_message}
-            </p>
-
-            <div class="brand">
-                Lozo Gateway
-            </div>
-
-        </div>
-
-    </body>
-    </html>
-    """
+    safe_message = html.escape(
+        str(message)
+    )
 
     return HTMLResponse(
-        content=content,
+        f"""
+<!DOCTYPE html>
+<html>
+<head>
+<meta charset="UTF-8">
+<meta name="viewport"
+      content="width=device-width,initial-scale=1.0">
+<title>{safe_title} - Lozo Gateway</title>
+
+<style>
+* {{
+    box-sizing:border-box;
+}}
+
+body {{
+    margin:0;
+    min-height:100vh;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    padding:20px;
+    background:linear-gradient(
+        135deg,
+        #020617,
+        #111827,
+        #0f172a
+    );
+    color:white;
+    font-family:
+        -apple-system,
+        BlinkMacSystemFont,
+        "Segoe UI",
+        Roboto,
+        Arial,
+        sans-serif;
+}}
+
+.card {{
+    width:100%;
+    max-width:460px;
+    padding:34px 25px;
+    text-align:center;
+    background:rgba(255,255,255,.06);
+    border:1px solid rgba(255,255,255,.10);
+    border-radius:22px;
+    box-shadow:0 20px 60px rgba(0,0,0,.45);
+}}
+
+.icon {{
+    width:70px;
+    height:70px;
+    margin:0 auto 20px;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    border-radius:50%;
+    background:rgba(239,68,68,.15);
+    color:#f87171;
+    font-size:32px;
+    font-weight:700;
+}}
+
+h1 {{
+    margin:0 0 12px;
+    font-size:25px;
+}}
+
+p {{
+    margin:0;
+    color:#cbd5e1;
+    line-height:1.6;
+    font-size:14px;
+}}
+
+.brand {{
+    margin-top:24px;
+    color:#64748b;
+    font-size:12px;
+}}
+</style>
+</head>
+
+<body>
+
+<div class="card">
+
+<div class="icon">!</div>
+
+<h1>{safe_title}</h1>
+
+<p>{safe_message}</p>
+
+<div class="brand">
+Lozo Gateway
+</div>
+
+</div>
+
+</body>
+</html>
+""",
         status_code=400
     )
 
@@ -375,28 +512,34 @@ def error_page(title, message):
 # ============================================================
 
 def get_token_record(token):
+
     if not db_ready():
         return None
 
     try:
+
         return db.tokens.find_one(
             {"token": token},
             {"_id": 0}
         )
 
     except Exception as e:
+
         logger.exception(
             "Failed to read token: %s",
             e
         )
+
         return None
 
 
 def token_entry_used(token):
+
     if not db_ready():
         return False
 
     try:
+
         return (
             db.gateway_states.find_one(
                 {
@@ -409,6 +552,7 @@ def token_entry_used(token):
         )
 
     except Exception as e:
+
         logger.exception(
             "Failed to check token entry state: %s",
             e
@@ -422,16 +566,19 @@ def token_entry_used(token):
 # ============================================================
 
 def get_session(state):
+
     if not db_ready():
         return None
 
     try:
+
         return db.gateway_states.find_one(
             {"state": state},
             {"_id": 0}
         )
 
     except Exception as e:
+
         logger.exception(
             "Failed to get session: %s",
             e
@@ -441,10 +588,12 @@ def get_session(state):
 
 
 def get_session_by_verify_id(verify_id):
+
     if not db_ready():
         return None
 
     try:
+
         return db.gateway_states.find_one(
             {
                 "challenge_hash": sha256(
@@ -455,6 +604,7 @@ def get_session_by_verify_id(verify_id):
         )
 
     except Exception as e:
+
         logger.exception(
             "Failed to get verification session: %s",
             e
@@ -469,10 +619,13 @@ def save_session(
     expires_at,
     browser_hash
 ):
+
     if not db_ready():
+
         logger.error(
             "Cannot save session: database unavailable."
         )
+
         return False
 
     payload = {
@@ -489,6 +642,7 @@ def save_session(
     }
 
     try:
+
         db.gateway_states.insert_one(
             payload
         )
@@ -501,6 +655,7 @@ def save_session(
         return True
 
     except Exception as e:
+
         logger.exception(
             "Failed to save gateway session: %s",
             e
@@ -510,10 +665,12 @@ def save_session(
 
 
 def update_session(state, values):
+
     if not db_ready():
         return False
 
     try:
+
         result = db.gateway_states.update_one(
             {"state": state},
             {"$set": values}
@@ -522,6 +679,7 @@ def update_session(state, values):
         return result.matched_count > 0
 
     except Exception as e:
+
         logger.exception(
             "Failed to update session: %s",
             e
@@ -531,10 +689,12 @@ def update_session(state, values):
 
 
 def delete_session(state):
+
     if not db_ready():
         return False
 
     try:
+
         db.gateway_states.delete_one(
             {"state": state}
         )
@@ -542,6 +702,7 @@ def delete_session(state):
         return True
 
     except Exception as e:
+
         logger.exception(
             "Failed to delete session: %s",
             e
@@ -551,18 +712,17 @@ def delete_session(state):
 
 
 # ============================================================
-# VPLink
+# VPLINK
 # ============================================================
 
 def create_vplink(destination):
-    """
-    Attempts multiple common VPLink API formats.
-    """
 
     if not VPLINK_API_KEY:
+
         logger.error(
             "VPLINK_API_KEY is not configured."
         )
+
         return None
 
     endpoints = [
@@ -595,6 +755,7 @@ def create_vplink(destination):
         for params in query_variants:
 
             try:
+
                 response = requests.get(
                     endpoint,
                     params=params,
@@ -612,7 +773,6 @@ def create_vplink(destination):
 
                 try:
                     data = response.json()
-
                 except Exception:
                     data = None
 
@@ -635,7 +795,9 @@ def create_vplink(destination):
                         ):
                             return value
 
-                    result = data.get("result")
+                    result = data.get(
+                        "result"
+                    )
 
                     if (
                         isinstance(result, str)
@@ -674,12 +836,11 @@ def create_vplink(destination):
                     return raw
 
             except Exception as e:
+
                 logger.warning(
                     "VPLink request failed: %s",
                     e
                 )
-
-                continue
 
     logger.error(
         "Unable to create VPLink."
@@ -699,144 +860,106 @@ def access_page(target):
         quote=True
     )
 
-    content = f"""
-    <!DOCTYPE html>
-    <html>
-
-    <head>
-
-        <meta charset="UTF-8">
-
-        <meta
-            name="viewport"
-            content="width=device-width, initial-scale=1.0"
-        >
-
-        <meta
-            http-equiv="refresh"
-            content="1;url={safe_target}"
-        >
-
-        <title>Lozo Gateway</title>
-
-        <style>
-
-            * {{
-                box-sizing: border-box;
-            }}
-
-            body {{
-                margin: 0;
-                min-height: 100vh;
-
-                display: flex;
-                align-items: center;
-                justify-content: center;
-
-                background:
-                    linear-gradient(
-                        135deg,
-                        #020617,
-                        #111827,
-                        #0f172a
-                    );
-
-                color: white;
-
-                font-family:
-                    -apple-system,
-                    BlinkMacSystemFont,
-                    "Segoe UI",
-                    Roboto,
-                    Arial,
-                    sans-serif;
-            }}
-
-            .card {{
-                width: calc(100% - 40px);
-                max-width: 430px;
-
-                padding: 34px 25px;
-
-                text-align: center;
-
-                background:
-                    rgba(255,255,255,0.06);
-
-                border:
-                    1px solid
-                    rgba(255,255,255,0.10);
-
-                border-radius: 22px;
-
-                box-shadow:
-                    0 20px 60px
-                    rgba(0,0,0,0.45);
-            }}
-
-            .loader {{
-                width: 58px;
-                height: 58px;
-
-                margin: 0 auto 22px;
-
-                border:
-                    4px solid
-                    rgba(255,255,255,0.15);
-
-                border-top-color: white;
-
-                border-radius: 50%;
-
-                animation:
-                    spin 0.9s linear infinite;
-            }}
-
-            @keyframes spin {{
-                to {{
-                    transform: rotate(360deg);
-                }}
-            }}
-
-            h1 {{
-                margin: 0 0 10px;
-                font-size: 24px;
-            }}
-
-            p {{
-                margin: 0;
-
-                color: #cbd5e1;
-
-                line-height: 1.6;
-                font-size: 14px;
-            }}
-
-        </style>
-
-    </head>
-
-    <body>
-
-        <div class="card">
-
-            <div class="loader"></div>
-
-            <h1>Lozo Gateway</h1>
-
-            <p>
-                Please wait while we redirect you...
-            </p>
-
-        </div>
-
-    </body>
-
-    </html>
-    """
-
     return HTMLResponse(
-        content=content
+        f"""
+<!DOCTYPE html>
+<html>
+<head>
+
+<meta charset="UTF-8">
+
+<meta name="viewport"
+      content="width=device-width,initial-scale=1.0">
+
+<meta http-equiv="refresh"
+      content="1;url={safe_target}">
+
+<title>Lozo Gateway</title>
+
+<style>
+* {{
+    box-sizing:border-box;
+}}
+
+body {{
+    margin:0;
+    min-height:100vh;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    background:linear-gradient(
+        135deg,
+        #020617,
+        #111827,
+        #0f172a
+    );
+    color:white;
+    font-family:
+        -apple-system,
+        BlinkMacSystemFont,
+        "Segoe UI",
+        Roboto,
+        Arial,
+        sans-serif;
+}}
+
+.card {{
+    width:calc(100% - 40px);
+    max-width:430px;
+    padding:34px 25px;
+    text-align:center;
+    background:rgba(255,255,255,.06);
+    border:1px solid rgba(255,255,255,.10);
+    border-radius:22px;
+    box-shadow:0 20px 60px rgba(0,0,0,.45);
+}}
+
+.loader {{
+    width:58px;
+    height:58px;
+    margin:0 auto 22px;
+    border:4px solid rgba(255,255,255,.15);
+    border-top-color:white;
+    border-radius:50%;
+    animation:spin .9s linear infinite;
+}}
+
+@keyframes spin {{
+    to {{ transform:rotate(360deg); }}
+}}
+
+h1 {{
+    margin:0 0 10px;
+    font-size:24px;
+}}
+
+p {{
+    margin:0;
+    color:#cbd5e1;
+    line-height:1.6;
+    font-size:14px;
+}}
+</style>
+
+</head>
+
+<body>
+
+<div class="card">
+
+<div class="loader"></div>
+
+<h1>Lozo Gateway</h1>
+
+<p>
+Please wait while we redirect you...
+</p>
+
+</div>
+
+</body>
+</html>
+"""
     )
 
 
@@ -854,160 +977,119 @@ def verification_page(
         quote=True
     )
 
-    content = f"""
-    <!DOCTYPE html>
-    <html>
-
-    <head>
-
-        <meta charset="UTF-8">
-
-        <meta
-            name="viewport"
-            content="width=device-width, initial-scale=1.0"
-        >
-
-        <title>Verification</title>
-
-        <style>
-
-            * {{
-                box-sizing: border-box;
-            }}
-
-            body {{
-                margin: 0;
-                min-height: 100vh;
-
-                display: flex;
-                align-items: center;
-                justify-content: center;
-
-                padding: 20px;
-
-                background:
-                    linear-gradient(
-                        135deg,
-                        #020617,
-                        #111827,
-                        #0f172a
-                    );
-
-                color: #fff;
-
-                font-family:
-                    -apple-system,
-                    BlinkMacSystemFont,
-                    "Segoe UI",
-                    Roboto,
-                    Arial,
-                    sans-serif;
-            }}
-
-            .card {{
-                width: 100%;
-                max-width: 460px;
-
-                padding: 32px 25px;
-
-                text-align: center;
-
-                background:
-                    rgba(255,255,255,0.06);
-
-                border:
-                    1px solid
-                    rgba(255,255,255,0.10);
-
-                border-radius: 22px;
-
-                box-shadow:
-                    0 20px 60px
-                    rgba(0,0,0,0.45);
-            }}
-
-            .icon {{
-                width: 70px;
-                height: 70px;
-
-                margin: 0 auto 20px;
-
-                display: flex;
-                align-items: center;
-                justify-content: center;
-
-                border-radius: 50%;
-
-                background:
-                    rgba(59,130,246,0.15);
-
-                font-size: 32px;
-            }}
-
-            h1 {{
-                margin: 0 0 12px;
-                font-size: 25px;
-            }}
-
-            p {{
-                margin: 0 0 25px;
-
-                color: #cbd5e1;
-
-                line-height: 1.6;
-                font-size: 14px;
-            }}
-
-            .button {{
-                display: inline-block;
-
-                padding: 13px 24px;
-
-                border-radius: 12px;
-
-                background: #2563eb;
-
-                color: white;
-
-                text-decoration: none;
-
-                font-weight: 600;
-            }}
-
-        </style>
-
-    </head>
-
-    <body>
-
-        <div class="card">
-
-            <div class="icon">
-                ✓
-            </div>
-
-            <h1>Verification Required</h1>
-
-            <p>
-                Complete the verification below to continue.
-            </p>
-
-            <a
-                class="button"
-                href="/verify/{safe_verify}"
-            >
-                Verify & Continue
-            </a>
-
-        </div>
-
-    </body>
-
-    </html>
-    """
-
     return HTMLResponse(
-        content=content
+        f"""
+<!DOCTYPE html>
+<html>
+<head>
+
+<meta charset="UTF-8">
+
+<meta name="viewport"
+      content="width=device-width,initial-scale=1.0">
+
+<title>Verification - Lozo Gateway</title>
+
+<style>
+* {{
+    box-sizing:border-box;
+}}
+
+body {{
+    margin:0;
+    min-height:100vh;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    padding:20px;
+    background:linear-gradient(
+        135deg,
+        #020617,
+        #111827,
+        #0f172a
+    );
+    color:#fff;
+    font-family:
+        -apple-system,
+        BlinkMacSystemFont,
+        "Segoe UI",
+        Roboto,
+        Arial,
+        sans-serif;
+}}
+
+.card {{
+    width:100%;
+    max-width:460px;
+    padding:32px 25px;
+    text-align:center;
+    background:rgba(255,255,255,.06);
+    border:1px solid rgba(255,255,255,.10);
+    border-radius:22px;
+    box-shadow:0 20px 60px rgba(0,0,0,.45);
+}}
+
+.icon {{
+    width:70px;
+    height:70px;
+    margin:0 auto 20px;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    border-radius:50%;
+    background:rgba(59,130,246,.15);
+    font-size:32px;
+}}
+
+h1 {{
+    margin:0 0 12px;
+    font-size:25px;
+}}
+
+p {{
+    margin:0 0 25px;
+    color:#cbd5e1;
+    line-height:1.6;
+    font-size:14px;
+}}
+
+.button {{
+    display:inline-block;
+    padding:13px 24px;
+    border-radius:12px;
+    background:#2563eb;
+    color:white;
+    text-decoration:none;
+    font-weight:600;
+}}
+</style>
+
+</head>
+
+<body>
+
+<div class="card">
+
+<div class="icon">✓</div>
+
+<h1>Verification Required</h1>
+
+<p>
+Complete the verification below to continue.
+</p>
+
+<a
+    class="button"
+    href="/verify/{safe_verify}"
+>
+Verify & Continue
+</a>
+
+</div>
+
+</body>
+</html>
+"""
     )
 
 
@@ -1015,116 +1097,94 @@ def verification_page(
 # ROOT
 # ============================================================
 
-@app.get("/", response_class=HTMLResponse)
+@app.get(
+    "/",
+    response_class=HTMLResponse
+)
 async def root():
 
     return HTMLResponse(
         """
-        <!DOCTYPE html>
-        <html>
+<!DOCTYPE html>
+<html>
+<head>
 
-        <head>
+<meta charset="UTF-8">
 
-            <meta charset="UTF-8">
+<meta name="viewport"
+      content="width=device-width,initial-scale=1.0">
 
-            <meta
-                name="viewport"
-                content="width=device-width, initial-scale=1.0"
-            >
+<title>Lozo Gateway</title>
 
-            <title>Lozo Gateway</title>
+<style>
+* {
+    box-sizing:border-box;
+}
 
-            <style>
+body {
+    margin:0;
+    min-height:100vh;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    padding:20px;
+    background:linear-gradient(
+        135deg,
+        #020617,
+        #111827,
+        #0f172a
+    );
+    color:white;
+    font-family:
+        -apple-system,
+        BlinkMacSystemFont,
+        "Segoe UI",
+        Roboto,
+        Arial,
+        sans-serif;
+}
 
-                * {
-                    box-sizing: border-box;
-                }
+.card {
+    width:100%;
+    max-width:460px;
+    padding:36px 25px;
+    text-align:center;
+    background:rgba(255,255,255,.06);
+    border:1px solid rgba(255,255,255,.10);
+    border-radius:22px;
+    box-shadow:0 20px 60px rgba(0,0,0,.45);
+}
 
-                body {
-                    margin: 0;
-                    min-height: 100vh;
+h1 {
+    margin:0 0 12px;
+    font-size:28px;
+}
 
-                    display: flex;
-                    align-items: center;
-                    justify-content: center;
+p {
+    margin:0;
+    color:#cbd5e1;
+    line-height:1.7;
+    font-size:15px;
+}
+</style>
 
-                    padding: 20px;
+</head>
 
-                    background:
-                        linear-gradient(
-                            135deg,
-                            #020617,
-                            #111827,
-                            #0f172a
-                        );
+<body>
 
-                    color: white;
+<div class="card">
 
-                    font-family:
-                        -apple-system,
-                        BlinkMacSystemFont,
-                        "Segoe UI",
-                        Roboto,
-                        Arial,
-                        sans-serif;
-                }
+<h1>Lozo Gateway</h1>
 
-                .card {
-                    width: 100%;
-                    max-width: 460px;
+<p>
+Secure gateway is active.
+</p>
 
-                    padding: 36px 25px;
+</div>
 
-                    text-align: center;
-
-                    background:
-                        rgba(255,255,255,0.06);
-
-                    border:
-                        1px solid
-                        rgba(255,255,255,0.10);
-
-                    border-radius: 22px;
-
-                    box-shadow:
-                        0 20px 60px
-                        rgba(0,0,0,0.45);
-                }
-
-                h1 {
-                    margin: 0 0 12px;
-                    font-size: 28px;
-                }
-
-                p {
-                    margin: 0;
-
-                    color: #cbd5e1;
-
-                    line-height: 1.7;
-                    font-size: 15px;
-                }
-
-            </style>
-
-        </head>
-
-        <body>
-
-            <div class="card">
-
-                <h1>Lozo Gateway</h1>
-
-                <p>
-                    Secure gateway is active.
-                </p>
-
-            </div>
-
-        </body>
-
-        </html>
-        """
+</body>
+</html>
+"""
     )
 
 
@@ -1143,7 +1203,7 @@ async def health():
 
 
 # ============================================================
-# ORIGINAL GATEWAY
+# GATEWAY
 # ============================================================
 
 @app.get("/api/gateway")
@@ -1176,10 +1236,12 @@ async def gateway(
         )
 
     # --------------------------------------------------------
-    # Check original token
+    # TOKEN
     # --------------------------------------------------------
 
-    token_record = get_token_record(token)
+    token_record = get_token_record(
+        token
+    )
 
     if not token_record:
 
@@ -1189,7 +1251,7 @@ async def gateway(
         )
 
     # --------------------------------------------------------
-    # Check original token expiry
+    # TOKEN EXPIRY
     # --------------------------------------------------------
 
     token_expires = (
@@ -1209,7 +1271,7 @@ async def gateway(
         )
 
     # --------------------------------------------------------
-    # One-time entry check
+    # ONE-TIME ENTRY
     # --------------------------------------------------------
 
     if token_entry_used(token):
@@ -1220,7 +1282,7 @@ async def gateway(
         )
 
     # --------------------------------------------------------
-    # Browser binding
+    # BROWSER ID
     # --------------------------------------------------------
 
     browser_id = request.cookies.get(
@@ -1235,7 +1297,7 @@ async def gateway(
     )
 
     # --------------------------------------------------------
-    # Create gateway state
+    # CREATE SESSION
     # --------------------------------------------------------
 
     access_id = random_id(24)
@@ -1286,7 +1348,7 @@ async def gateway(
         )
 
     # --------------------------------------------------------
-    # Save VPLink target
+    # SAVE VPLink
     # --------------------------------------------------------
 
     update_session(
@@ -1297,7 +1359,7 @@ async def gateway(
     )
 
     # --------------------------------------------------------
-    # Redirect to access page
+    # REDIRECT
     # --------------------------------------------------------
 
     response = RedirectResponse(
@@ -1414,7 +1476,7 @@ async def access(
 
 
 # ============================================================
-# VPLink COMPLETE
+# VPLINK COMPLETE
 # ============================================================
 
 @app.get("/api/complete")
@@ -1451,7 +1513,7 @@ async def complete(
         )
 
     # --------------------------------------------------------
-    # Browser binding
+    # BROWSER
     # --------------------------------------------------------
 
     browser_id = request.cookies.get(
@@ -1480,7 +1542,7 @@ async def complete(
         )
 
     # --------------------------------------------------------
-    # Already verified?
+    # ALREADY VERIFIED
     # --------------------------------------------------------
 
     if session.get("verified"):
@@ -1491,7 +1553,7 @@ async def complete(
         )
 
     # --------------------------------------------------------
-    # Create verification challenge
+    # CREATE CHALLENGE
     # --------------------------------------------------------
 
     verify_id = random_id(24)
@@ -1577,7 +1639,7 @@ async def verify(
         )
 
     # --------------------------------------------------------
-    # Browser check
+    # BROWSER
     # --------------------------------------------------------
 
     browser_id = request.cookies.get(
@@ -1606,7 +1668,7 @@ async def verify(
         )
 
     # --------------------------------------------------------
-    # Verify challenge
+    # CHALLENGE
     # --------------------------------------------------------
 
     if (
@@ -1620,7 +1682,7 @@ async def verify(
         )
 
     # --------------------------------------------------------
-    # Verification expiry
+    # VERIFICATION EXPIRY
     # --------------------------------------------------------
 
     verify_expires_at = session.get(
@@ -1640,7 +1702,7 @@ async def verify(
         )
 
     # --------------------------------------------------------
-    # Mark verified
+    # MARK VERIFIED
     # --------------------------------------------------------
 
     verified_at = now_utc()
@@ -1663,7 +1725,7 @@ async def verify(
         )
 
     # --------------------------------------------------------
-    # Verification cookie
+    # VERIFICATION COOKIE
     # --------------------------------------------------------
 
     response = RedirectResponse(
@@ -1705,7 +1767,7 @@ async def deliver(
         )
 
     # --------------------------------------------------------
-    # Session state
+    # SESSION
     # --------------------------------------------------------
 
     if session.get("used"):
@@ -1725,7 +1787,7 @@ async def deliver(
         )
 
     # --------------------------------------------------------
-    # Browser binding
+    # BROWSER
     # --------------------------------------------------------
 
     browser_id = request.cookies.get(
@@ -1754,7 +1816,7 @@ async def deliver(
         )
 
     # --------------------------------------------------------
-    # Verification cookie
+    # VERIFICATION COOKIE
     # --------------------------------------------------------
 
     verified_cookie = request.cookies.get(
@@ -1769,7 +1831,7 @@ async def deliver(
         )
 
     # --------------------------------------------------------
-    # Verification state
+    # VERIFIED
     # --------------------------------------------------------
 
     if not session.get("verified"):
@@ -1796,7 +1858,7 @@ async def deliver(
         )
 
     # --------------------------------------------------------
-    # Original token
+    # ORIGINAL TOKEN
     # --------------------------------------------------------
 
     original_token = session.get(
@@ -1822,7 +1884,7 @@ async def deliver(
         )
 
     # --------------------------------------------------------
-    # Original token expiry
+    # ORIGINAL TOKEN EXPIRY
     # --------------------------------------------------------
 
     token_expires = (
@@ -1833,9 +1895,7 @@ async def deliver(
 
     if (
         token_expires
-        and is_expired(
-            token_expires
-        )
+        and is_expired(token_expires)
     ):
 
         return error_page(
@@ -1844,7 +1904,7 @@ async def deliver(
         )
 
     # --------------------------------------------------------
-    # Telegram destination
+    # TELEGRAM DESTINATION
     # --------------------------------------------------------
 
     telegram_url = (
@@ -1853,7 +1913,7 @@ async def deliver(
     )
 
     # --------------------------------------------------------
-    # Mark final gateway session as used
+    # MARK USED
     # --------------------------------------------------------
 
     updated = update_session(
@@ -1871,7 +1931,7 @@ async def deliver(
         )
 
     # --------------------------------------------------------
-    # Redirect to Telegram
+    # REDIRECT TO TELEGRAM
     # --------------------------------------------------------
 
     response = RedirectResponse(
