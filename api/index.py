@@ -1193,13 +1193,40 @@ Secure gateway is active.
 # ============================================================
 
 @app.get("/health")
-async def health():
-
-    return {
+def health():
+    result = {
         "ok": True,
         "service": "lozo-gateway",
-        "database": db_ready()
+        "database": db_ready(),
     }
+
+    if not db_ready():
+        return JSONResponse(result, status_code=500)
+
+    try:
+        test_state = "__health_test__" + secrets.token_hex(8)
+
+        db.gateway_states.insert_one({
+            "state": test_state,
+            "token": "__health_test__",
+            "expires_at": datetime.now(timezone.utc) + timedelta(minutes=1),
+            "used": False,
+            "entry_used": False,
+            "verified": False,
+            "challenge_hash": None,
+        })
+
+        db.gateway_states.delete_one({"state": test_state})
+
+        result["database_write"] = True
+        result["message"] = "MongoDB read/write working"
+        return JSONResponse(result)
+
+    except Exception as e:
+        result["database_write"] = False
+        result["error_type"] = type(e).__name__
+        result["error"] = str(e)
+        return JSONResponse(result, status_code=500)
 
 
 # ============================================================
