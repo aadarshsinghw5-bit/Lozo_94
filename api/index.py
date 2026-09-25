@@ -78,10 +78,10 @@ def initialize_database():
 
         db = mongo[MONGO_DB]
 
-        # -------------------------------------------------
-        # tokens.token
-        # Must be UNIQUE
-        # -------------------------------------------------
+        # =================================================
+        # TOKENS INDEX
+        # token must be UNIQUE
+        # =================================================
 
         token_indexes = {
             idx["name"]: idx
@@ -110,10 +110,10 @@ def initialize_database():
                 unique=True
             )
 
-        # -------------------------------------------------
-        # gateway_states.state
-        # Must be UNIQUE
-        # -------------------------------------------------
+        # =================================================
+        # GATEWAY STATE INDEX
+        # state must be UNIQUE
+        # =================================================
 
         gateway_indexes = {
             idx["name"]: idx
@@ -142,22 +142,22 @@ def initialize_database():
                 unique=True
             )
 
-        # -------------------------------------------------
-        # gateway_states.token
-        # Must NOT be UNIQUE
-        # -------------------------------------------------
+        # =================================================
+        # GATEWAY TOKEN INDEX
+        # token must NOT be UNIQUE
+        # =================================================
 
         gateway_indexes = {
             idx["name"]: idx
             for idx in db.gateway_states.list_indexes()
         }
 
-        token_state_index = gateway_indexes.get("token_1")
+        gateway_token_index = gateway_indexes.get("token_1")
 
-        if token_state_index:
-            if token_state_index.get("unique", False):
+        if gateway_token_index:
+            if gateway_token_index.get("unique", False):
                 logger.info(
-                    "Removing old UNIQUE gateway_states token index"
+                    "Removing old UNIQUE gateway_states.token_1"
                 )
 
                 db.gateway_states.drop_index("token_1")
@@ -174,50 +174,32 @@ def initialize_database():
                 unique=False
             )
 
-        # -------------------------------------------------
-        # gateway_states.challenge_hash
+        # =================================================
+        # CHALLENGE HASH INDEX
         #
         # IMPORTANT:
-        # UNIQUE + SPARSE
+        # DO NOT CREATE THIS INDEX.
         #
-        # This allows multiple documents where the field
-        # does not exist, while actual challenge hashes
-        # remain unique.
-        # -------------------------------------------------
+        # Older deployments may have created
+        # challenge_hash_1. Remove it automatically.
+        # =================================================
 
         gateway_indexes = {
             idx["name"]: idx
             for idx in db.gateway_states.list_indexes()
         }
 
-        challenge_index = gateway_indexes.get("challenge_hash_1")
+        challenge_index = gateway_indexes.get(
+            "challenge_hash_1"
+        )
 
         if challenge_index:
-            is_unique = challenge_index.get("unique", False)
-            is_sparse = challenge_index.get("sparse", False)
+            logger.info(
+                "Removing obsolete gateway_states.challenge_hash_1"
+            )
 
-            if not (is_unique and is_sparse):
-                logger.info(
-                    "Fixing gateway_states.challenge_hash_1 "
-                    "-> UNIQUE + SPARSE"
-                )
-
-                db.gateway_states.drop_index(
-                    "challenge_hash_1"
-                )
-
-                db.gateway_states.create_index(
-                    [("challenge_hash", ASCENDING)],
-                    name="challenge_hash_1",
-                    unique=True,
-                    sparse=True
-                )
-        else:
-            db.gateway_states.create_index(
-                [("challenge_hash", ASCENDING)],
-                name="challenge_hash_1",
-                unique=True,
-                sparse=True
+            db.gateway_states.drop_index(
+                "challenge_hash_1"
             )
 
         logger.info(
@@ -253,7 +235,7 @@ def db_ready():
 
 
 # =========================================================
-# HTML HELPERS
+# ERROR PAGE
 # =========================================================
 
 def error_page(title, message):
@@ -268,6 +250,7 @@ def error_page(title, message):
                 content="width=device-width, initial-scale=1.0"
             >
             <title>{html.escape(title)}</title>
+
             <style>
                 body {{
                     margin: 0;
@@ -436,7 +419,6 @@ def create_vplink(destination):
 
     for endpoint in endpoints:
         for params in parameter_sets:
-
             try:
                 logger.info(
                     "Trying VPLink endpoint: %s",
@@ -463,7 +445,7 @@ def create_vplink(destination):
                 ).lower()
 
                 # -----------------------------------------
-                # JSON response
+                # JSON
                 # -----------------------------------------
 
                 if "application/json" in content_type:
@@ -475,7 +457,6 @@ def create_vplink(destination):
 
                     if isinstance(data, dict):
 
-                        # Direct keys
                         for key in [
                             "shortenedUrl",
                             "shortened_url",
@@ -492,10 +473,10 @@ def create_vplink(destination):
                             ):
                                 return value
 
-                        # Nested result
                         nested = data.get("result")
 
                         if isinstance(nested, dict):
+
                             for key in [
                                 "shortenedUrl",
                                 "shortened_url",
@@ -519,7 +500,7 @@ def create_vplink(destination):
                             return nested
 
                 # -----------------------------------------
-                # Raw text response
+                # RAW TEXT
                 # -----------------------------------------
 
                 text = response.text.strip()
@@ -539,7 +520,7 @@ def create_vplink(destination):
 
 
 # =========================================================
-# ROUTES
+# HOME
 # =========================================================
 
 @app.get("/")
@@ -550,11 +531,14 @@ def home():
         <html>
         <head>
             <meta charset="UTF-8">
+
             <meta
                 name="viewport"
                 content="width=device-width, initial-scale=1.0"
             >
+
             <title>Lozo Gateway</title>
+
             <style>
                 body {
                     margin: 0;
@@ -605,6 +589,7 @@ def health():
     }
 
     if not db_ready():
+
         result["database_write"] = False
 
         if DB_ERROR:
@@ -618,8 +603,11 @@ def health():
             status_code=500
         )
 
-    # Test actual database write
     try:
+
+        # IMPORTANT:
+        # No challenge_hash field here.
+        # This prevents UNIQUE/null conflicts.
 
         test_state = (
             "__health_test__"
@@ -637,7 +625,6 @@ def health():
                 "used": False,
                 "entry_used": False,
                 "verified": False,
-                "challenge_hash": None,
             }
         )
 
@@ -665,7 +652,7 @@ def health():
 
 
 # =========================================================
-# GATEWAY ENTRY
+# GATEWAY
 # =========================================================
 
 @app.get("/api/gateway")
@@ -695,7 +682,7 @@ def gateway(
         )
 
     # -----------------------------------------------------
-    # Token lookup
+    # TOKEN
     # -----------------------------------------------------
 
     token_record = get_token_record(token)
@@ -707,12 +694,14 @@ def gateway(
         )
 
     # -----------------------------------------------------
-    # Token expiry
+    # EXPIRY
     # -----------------------------------------------------
 
     now = datetime.now(timezone.utc)
 
-    token_expiry = token_record.get("expires_at")
+    token_expiry = token_record.get(
+        "expires_at"
+    )
 
     if token_expiry:
 
@@ -728,7 +717,7 @@ def gateway(
             )
 
     # -----------------------------------------------------
-    # Already used
+    # ALREADY USED
     # -----------------------------------------------------
 
     if token_entry_used(token):
@@ -738,7 +727,7 @@ def gateway(
         )
 
     # -----------------------------------------------------
-    # Browser ID
+    # BROWSER
     # -----------------------------------------------------
 
     browser_id = request.cookies.get(
@@ -756,7 +745,7 @@ def gateway(
     ).hexdigest()
 
     # -----------------------------------------------------
-    # Create session
+    # SESSION
     # -----------------------------------------------------
 
     state = secrets.token_urlsafe(32)
@@ -776,7 +765,6 @@ def gateway(
         "used": False,
         "entry_used": True,
 
-        "challenge_hash": None,
         "verified": False,
         "verified_at": None,
         "verify_expires_at": None,
@@ -805,7 +793,7 @@ def gateway(
         )
 
     # -----------------------------------------------------
-    # VPLink destination
+    # VPLINK
     # -----------------------------------------------------
 
     complete_url = (
@@ -834,7 +822,7 @@ def gateway(
     )
 
     # -----------------------------------------------------
-    # Access page
+    # REDIRECT TO ACCESS
     # -----------------------------------------------------
 
     response = RedirectResponse(
@@ -866,7 +854,7 @@ def gateway(
 
 
 # =========================================================
-# ACCESS PAGE
+# ACCESS
 # =========================================================
 
 @app.get("/access/{access_id}")
@@ -894,7 +882,9 @@ def access_page(
 
     now = datetime.now(timezone.utc)
 
-    expires_at = session.get("expires_at")
+    expires_at = session.get(
+        "expires_at"
+    )
 
     if expires_at:
 
@@ -1000,7 +990,7 @@ def access_page(
 
 
 # =========================================================
-# VPLink COMPLETE
+# COMPLETE
 # =========================================================
 
 @app.get("/api/complete")
@@ -1045,13 +1035,14 @@ def complete(
             )
 
     if session.get("used"):
+
         return RedirectResponse(
             url=f"/api/deliver?state={state}",
             status_code=302
         )
 
     # -----------------------------------------------------
-    # Browser binding
+    # BROWSER
     # -----------------------------------------------------
 
     browser_id = request.cookies.get(
@@ -1077,7 +1068,7 @@ def complete(
         )
 
     # -----------------------------------------------------
-    # Already verified
+    # ALREADY VERIFIED
     # -----------------------------------------------------
 
     if session.get("verified"):
@@ -1088,7 +1079,7 @@ def complete(
         )
 
     # -----------------------------------------------------
-    # Create verification challenge
+    # CREATE VERIFY CHALLENGE
     # -----------------------------------------------------
 
     verify_id = secrets.token_urlsafe(32)
@@ -1236,7 +1227,7 @@ def verify(
     now = datetime.now(timezone.utc)
 
     # -----------------------------------------------------
-    # Browser binding
+    # BROWSER
     # -----------------------------------------------------
 
     browser_id = request.cookies.get(
@@ -1262,7 +1253,7 @@ def verify(
         )
 
     # -----------------------------------------------------
-    # Verification expiry
+    # VERIFY EXPIRY
     # -----------------------------------------------------
 
     verify_expires_at = session.get(
@@ -1287,7 +1278,7 @@ def verify(
         )
 
     # -----------------------------------------------------
-    # Challenge check
+    # CHALLENGE
     # -----------------------------------------------------
 
     expected_hash = session.get(
@@ -1305,7 +1296,7 @@ def verify(
         )
 
     # -----------------------------------------------------
-    # Mark verified
+    # MARK VERIFIED
     # -----------------------------------------------------
 
     update_session(
@@ -1365,7 +1356,7 @@ def deliver(
     now = datetime.now(timezone.utc)
 
     # -----------------------------------------------------
-    # Browser binding
+    # BROWSER
     # -----------------------------------------------------
 
     browser_id = request.cookies.get(
@@ -1391,7 +1382,7 @@ def deliver(
         )
 
     # -----------------------------------------------------
-    # Session expiry
+    # SESSION EXPIRY
     # -----------------------------------------------------
 
     expires_at = session.get(
@@ -1412,7 +1403,7 @@ def deliver(
             )
 
     # -----------------------------------------------------
-    # Verification cookie/state
+    # VERIFICATION
     # -----------------------------------------------------
 
     verified_cookie = request.cookies.get(
@@ -1428,7 +1419,7 @@ def deliver(
             )
 
     # -----------------------------------------------------
-    # Verification expiry
+    # VERIFICATION EXPIRY
     # -----------------------------------------------------
 
     verify_expires_at = session.get(
@@ -1449,7 +1440,7 @@ def deliver(
             )
 
     # -----------------------------------------------------
-    # Already delivered
+    # ALREADY DELIVERED
     # -----------------------------------------------------
 
     if session.get("used"):
@@ -1459,7 +1450,7 @@ def deliver(
         )
 
     # -----------------------------------------------------
-    # Original token
+    # ORIGINAL TOKEN
     # -----------------------------------------------------
 
     original_token = session.get(
@@ -1500,7 +1491,7 @@ def deliver(
             )
 
     # -----------------------------------------------------
-    # Mark used
+    # MARK SESSION USED
     # -----------------------------------------------------
 
     result = db.gateway_states.update_one(
@@ -1517,14 +1508,13 @@ def deliver(
     )
 
     if result.modified_count != 1:
-
         return error_page(
             "Link Already Used",
             "This gateway session has already been used."
         )
 
     # -----------------------------------------------------
-    # Telegram deep link
+    # TELEGRAM
     # -----------------------------------------------------
 
     telegram_url = (
@@ -1557,7 +1547,7 @@ def deliver(
 
 
 # =========================================================
-# DEBUG SESSION ENDPOINT
+# DEBUG SESSION
 # =========================================================
 
 @app.get("/api/session")
@@ -1585,7 +1575,6 @@ def debug_session(
             status_code=404
         )
 
-    # Remove sensitive values
     safe = dict(session)
 
     safe.pop(
