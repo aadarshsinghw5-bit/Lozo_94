@@ -325,6 +325,158 @@ def create_vplink(destination):
 
 
 # ============================================================
+# ERROR PAGE
+# ============================================================
+
+def error_page(title, message):
+    safe_title = html.escape(str(title))
+    safe_message = html.escape(str(message))
+
+    content = f"""
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="UTF-8">
+
+        <meta
+            name="viewport"
+            content="width=device-width, initial-scale=1.0"
+        >
+
+        <title>{safe_title} - Lozo Gateway</title>
+
+        <style>
+            * {{
+                box-sizing: border-box;
+            }}
+
+            body {{
+                margin: 0;
+                min-height: 100vh;
+
+                display: flex;
+                align-items: center;
+                justify-content: center;
+
+                padding: 20px;
+
+                background:
+                    linear-gradient(
+                        135deg,
+                        #020617,
+                        #111827,
+                        #0f172a
+                    );
+
+                color: white;
+
+                font-family:
+                    -apple-system,
+                    BlinkMacSystemFont,
+                    "Segoe UI",
+                    Roboto,
+                    Arial,
+                    sans-serif;
+            }}
+
+            .card {{
+                width: 100%;
+                max-width: 460px;
+
+                padding: 34px 25px;
+
+                text-align: center;
+
+                background:
+                    rgba(255,255,255,0.06);
+
+                border:
+                    1px solid
+                    rgba(255,255,255,0.10);
+
+                border-radius: 22px;
+
+                box-shadow:
+                    0 20px 60px
+                    rgba(0,0,0,0.45);
+            }}
+
+            .icon {{
+                width: 70px;
+                height: 70px;
+
+                margin: 0 auto 20px;
+
+                display: flex;
+                align-items: center;
+                justify-content: center;
+
+                border-radius: 50%;
+
+                background:
+                    rgba(239,68,68,0.15);
+
+                color: #f87171;
+
+                font-size: 32px;
+                font-weight: 700;
+            }}
+
+            h1 {{
+                margin: 0 0 12px;
+
+                font-size: 25px;
+            }}
+
+            p {{
+                margin: 0;
+
+                color: #cbd5e1;
+
+                line-height: 1.6;
+                font-size: 14px;
+            }}
+
+            .brand {{
+                margin-top: 24px;
+
+                color: #64748b;
+
+                font-size: 12px;
+            }}
+        </style>
+    </head>
+
+    <body>
+
+        <div class="card">
+
+            <div class="icon">
+                !
+            </div>
+
+            <h1>{safe_title}</h1>
+
+            <p>
+                {safe_message}
+            </p>
+
+            <div class="brand">
+                Lozo Gateway
+            </div>
+
+        </div>
+
+    </body>
+    </html>
+    """
+
+    return HTMLResponse(
+        content=content,
+        status_code=400
+    )
+
+# ============================================================
 # ACCESS PAGE
 # ============================================================
 
