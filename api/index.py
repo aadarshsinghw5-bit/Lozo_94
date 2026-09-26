@@ -16,25 +16,58 @@ from pymongo import MongoClient, ASCENDING
 # CONFIG
 # =========================================================
 
-BOT_USERNAME = os.getenv("BOT_USERNAME", "").replace("@", "").strip()
+# Bot 1 username
+# Existing BOT_USERNAME env variable can remain as it is.
+BOT_USERNAME = os.getenv(
+    "BOT_USERNAME",
+    ""
+).replace("@", "").strip()
 
-MONGO_URI = os.getenv("MONGO_URI", "").strip()
-MONGO_DB = os.getenv("MONGO_DB", "file_store_bot").strip()
+# Bot 2 username
+# Add BOT2_USERNAME in Vercel environment variables.
+BOT2_USERNAME = os.getenv(
+    "BOT2_USERNAME",
+    ""
+).replace("@", "").strip()
+
+MONGO_URI = os.getenv(
+    "MONGO_URI",
+    ""
+).strip()
+
+MONGO_DB = os.getenv(
+    "MONGO_DB",
+    "file_store_bot"
+).strip()
 
 VPLINK_API_URL = os.getenv(
     "VPLINK_API_URL",
     "https://vplink.in/api"
 ).strip().rstrip("/")
 
-VPLINK_API_KEY = os.getenv("VPLINK_API_KEY", "").strip()
+VPLINK_API_KEY = os.getenv(
+    "VPLINK_API_KEY",
+    ""
+).strip()
 
 GATEWAY_DOMAIN = os.getenv(
     "GATEWAY_DOMAIN",
     "https://lozo-94.vercel.app"
 ).strip().rstrip("/")
 
-SESSION_MINUTES = int(os.getenv("SESSION_MINUTES", "30"))
-VERIFY_MINUTES = int(os.getenv("VERIFY_MINUTES", "10"))
+SESSION_MINUTES = int(
+    os.getenv(
+        "SESSION_MINUTES",
+        "30"
+    )
+)
+
+VERIFY_MINUTES = int(
+    os.getenv(
+        "VERIFY_MINUTES",
+        "10"
+    )
+)
 
 
 # =========================================================
@@ -43,8 +76,13 @@ VERIFY_MINUTES = int(os.getenv("VERIFY_MINUTES", "10"))
 
 app = FastAPI()
 
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger("lozo-gateway")
+logging.basicConfig(
+    level=logging.INFO
+)
+
+logger = logging.getLogger(
+    "lozo-gateway"
+)
 
 
 # =========================================================
@@ -79,36 +117,72 @@ def initialize_database():
         db = mongo[MONGO_DB]
 
         # =================================================
-        # TOKENS INDEX
-        # token must be UNIQUE
+        # TOKEN INDEXES
+        #
+        # Tokens are now stored separately:
+        #
+        # bot_bot1_tokens
+        # bot_bot2_tokens
+        #
+        # Keep legacy tokens collection indexed too.
         # =================================================
 
-        token_indexes = {
-            idx["name"]: idx
-            for idx in db.tokens.list_indexes()
-        }
+        token_collections = [
+            "bot_bot1_tokens",
+            "bot_bot2_tokens",
+            "tokens",
+        ]
 
-        token_index = token_indexes.get("token_1")
+        for collection_name in token_collections:
 
-        if token_index:
-            if not token_index.get("unique", False):
-                logger.info(
-                    "Fixing tokens.token_1 -> UNIQUE"
+            collection = db[collection_name]
+
+            try:
+                token_indexes = {
+                    idx["name"]: idx
+                    for idx in collection.list_indexes()
+                }
+
+                token_index = token_indexes.get(
+                    "token_1"
                 )
 
-                db.tokens.drop_index("token_1")
+                if token_index:
 
-                db.tokens.create_index(
-                    [("token", ASCENDING)],
-                    name="token_1",
-                    unique=True
+                    if not token_index.get(
+                        "unique",
+                        False
+                    ):
+                        logger.info(
+                            "Fixing %s.token_1 -> UNIQUE",
+                            collection_name
+                        )
+
+                        collection.drop_index(
+                            "token_1"
+                        )
+
+                        collection.create_index(
+                            [("token", ASCENDING)],
+                            name="token_1",
+                            unique=True
+                        )
+
+                else:
+
+                    collection.create_index(
+                        [("token", ASCENDING)],
+                        name="token_1",
+                        unique=True
+                    )
+
+            except Exception as e:
+
+                logger.warning(
+                    "Token index check failed for %s: %s",
+                    collection_name,
+                    e
                 )
-        else:
-            db.tokens.create_index(
-                [("token", ASCENDING)],
-                name="token_1",
-                unique=True
-            )
 
         # =================================================
         # GATEWAY STATE INDEX
@@ -120,22 +194,33 @@ def initialize_database():
             for idx in db.gateway_states.list_indexes()
         }
 
-        state_index = gateway_indexes.get("state_1")
+        state_index = gateway_indexes.get(
+            "state_1"
+        )
 
         if state_index:
-            if not state_index.get("unique", False):
+
+            if not state_index.get(
+                "unique",
+                False
+            ):
+
                 logger.info(
                     "Fixing gateway_states.state_1 -> UNIQUE"
                 )
 
-                db.gateway_states.drop_index("state_1")
+                db.gateway_states.drop_index(
+                    "state_1"
+                )
 
                 db.gateway_states.create_index(
                     [("state", ASCENDING)],
                     name="state_1",
                     unique=True
                 )
+
         else:
+
             db.gateway_states.create_index(
                 [("state", ASCENDING)],
                 name="state_1",
@@ -144,7 +229,9 @@ def initialize_database():
 
         # =================================================
         # GATEWAY TOKEN INDEX
-        # token must NOT be UNIQUE
+        #
+        # token must NOT be UNIQUE because the same token
+        # may have multiple historical gateway states.
         # =================================================
 
         gateway_indexes = {
@@ -152,22 +239,33 @@ def initialize_database():
             for idx in db.gateway_states.list_indexes()
         }
 
-        gateway_token_index = gateway_indexes.get("token_1")
+        gateway_token_index = gateway_indexes.get(
+            "token_1"
+        )
 
         if gateway_token_index:
-            if gateway_token_index.get("unique", False):
+
+            if gateway_token_index.get(
+                "unique",
+                False
+            ):
+
                 logger.info(
                     "Removing old UNIQUE gateway_states.token_1"
                 )
 
-                db.gateway_states.drop_index("token_1")
+                db.gateway_states.drop_index(
+                    "token_1"
+                )
 
                 db.gateway_states.create_index(
                     [("token", ASCENDING)],
                     name="token_1",
                     unique=False
                 )
+
         else:
+
             db.gateway_states.create_index(
                 [("token", ASCENDING)],
                 name="token_1",
@@ -177,11 +275,8 @@ def initialize_database():
         # =================================================
         # CHALLENGE HASH INDEX
         #
-        # IMPORTANT:
-        # DO NOT CREATE THIS INDEX.
-        #
-        # Older deployments may have created
-        # challenge_hash_1. Remove it automatically.
+        # Do NOT keep this index.
+        # Older deployments may have created it.
         # =================================================
 
         gateway_indexes = {
@@ -194,6 +289,7 @@ def initialize_database():
         )
 
         if challenge_index:
+
             logger.info(
                 "Removing obsolete gateway_states.challenge_hash_1"
             )
@@ -211,10 +307,17 @@ def initialize_database():
             "MongoDB indexes verified successfully."
         )
 
+        logger.info(
+            "Dual-bot token namespaces enabled."
+        )
+
         return True
 
     except Exception as e:
-        DB_ERROR = f"{type(e).__name__}: {str(e)}"
+
+        DB_ERROR = (
+            f"{type(e).__name__}: {str(e)}"
+        )
 
         logger.error(
             "MongoDB initialization failed: %s",
@@ -235,23 +338,147 @@ def db_ready():
 
 
 # =========================================================
+# BOT / TOKEN HELPERS
+# =========================================================
+
+def get_token_record(token):
+    """
+    Search token inside both bot namespaces.
+
+    Bot 1:
+        bot_bot1_tokens
+
+    Bot 2:
+        bot_bot2_tokens
+
+    Legacy:
+        tokens
+
+    Returns:
+        token record or None
+    """
+
+    if not db_ready():
+        return None
+
+    # -----------------------------------------------------
+    # Bot 1
+    # -----------------------------------------------------
+
+    try:
+
+        record = db.bot_bot1_tokens.find_one(
+            {"token": token},
+            {"_id": 0}
+        )
+
+        if record:
+
+            record["_gateway_bot_id"] = "bot1"
+
+            return record
+
+    except Exception as e:
+
+        logger.warning(
+            "Bot 1 token lookup failed: %s",
+            e
+        )
+
+    # -----------------------------------------------------
+    # Bot 2
+    # -----------------------------------------------------
+
+    try:
+
+        record = db.bot_bot2_tokens.find_one(
+            {"token": token},
+            {"_id": 0}
+        )
+
+        if record:
+
+            record["_gateway_bot_id"] = "bot2"
+
+            return record
+
+    except Exception as e:
+
+        logger.warning(
+            "Bot 2 token lookup failed: %s",
+            e
+        )
+
+    # -----------------------------------------------------
+    # Legacy tokens collection
+    #
+    # Keeps old Bot 1 links working if any still exist.
+    # -----------------------------------------------------
+
+    try:
+
+        record = db.tokens.find_one(
+            {"token": token},
+            {"_id": 0}
+        )
+
+        if record:
+
+            record["_gateway_bot_id"] = (
+                record.get("bot_id")
+                or "bot1"
+            )
+
+            return record
+
+    except Exception as e:
+
+        logger.warning(
+            "Legacy token lookup failed: %s",
+            e
+        )
+
+    return None
+
+
+def get_bot_username(bot_id):
+    """
+    Resolve Telegram username according to token namespace.
+    """
+
+    bot_id = str(
+        bot_id or "bot1"
+    ).strip().lower()
+
+    if bot_id == "bot2":
+        return BOT2_USERNAME
+
+    return BOT_USERNAME
+
+
+# =========================================================
 # ERROR PAGE
 # =========================================================
 
 def error_page(title, message):
+
     return HTMLResponse(
         f"""
         <!DOCTYPE html>
         <html>
         <head>
+
             <meta charset="UTF-8">
+
             <meta
                 name="viewport"
                 content="width=device-width, initial-scale=1.0"
             >
+
             <title>{html.escape(title)}</title>
 
             <style>
+
                 body {{
                     margin: 0;
                     min-height: 100vh;
@@ -271,7 +498,8 @@ def error_page(title, message):
                     text-align: center;
                     border-radius: 18px;
                     background: #191919;
-                    box-shadow: 0 10px 40px rgba(0,0,0,.4);
+                    box-shadow:
+                        0 10px 40px rgba(0,0,0,.4);
                 }}
 
                 h1 {{
@@ -289,15 +517,29 @@ def error_page(title, message):
                     font-size: 13px;
                     color: #777;
                 }}
+
             </style>
+
         </head>
 
         <body>
+
             <div class="box">
-                <h1>{html.escape(title)}</h1>
-                <p>{html.escape(message)}</p>
-                <div class="brand">Lozo Gateway</div>
+
+                <h1>
+                    {html.escape(title)}
+                </h1>
+
+                <p>
+                    {html.escape(message)}
+                </p>
+
+                <div class="brand">
+                    Lozo Gateway
+                </div>
+
             </div>
+
         </body>
         </html>
         """,
@@ -309,29 +551,25 @@ def error_page(title, message):
 # DATABASE HELPERS
 # =========================================================
 
-def get_token_record(token):
-    if not db_ready():
-        return None
-
-    return db.tokens.find_one(
-        {"token": token},
-        {"_id": 0}
-    )
-
-
 def token_entry_used(token):
+
     if not db_ready():
         return False
 
-    return db.gateway_states.find_one(
-        {
-            "token": token,
-            "entry_used": True
-        }
-    ) is not None
+    return (
+        db.gateway_states.find_one(
+            {
+                "token": token,
+                "entry_used": True
+            },
+            {"_id": 1}
+        )
+        is not None
+    )
 
 
 def get_session(state):
+
     if not db_ready():
         return None
 
@@ -341,7 +579,10 @@ def get_session(state):
     )
 
 
-def get_session_by_verify_id(verify_id):
+def get_session_by_verify_id(
+    verify_id
+):
+
     if not db_ready():
         return None
 
@@ -352,15 +593,22 @@ def get_session_by_verify_id(verify_id):
 
 
 def save_session(session):
+
     if not db_ready():
         return False
 
-    db.gateway_states.insert_one(session)
+    db.gateway_states.insert_one(
+        session
+    )
 
     return True
 
 
-def update_session(state, update):
+def update_session(
+    state,
+    update
+):
+
     if not db_ready():
         return False
 
@@ -373,6 +621,7 @@ def update_session(state, update):
 
 
 def delete_session(state):
+
     if not db_ready():
         return False
 
@@ -388,38 +637,55 @@ def delete_session(state):
 # =========================================================
 
 def create_vplink(destination):
+
     if not VPLINK_API_KEY:
-        logger.error("VPLINK_API_KEY is missing")
+
+        logger.error(
+            "VPLINK_API_KEY is missing"
+        )
+
         return None
 
     endpoints = [
+
         VPLINK_API_URL,
+
         f"{VPLINK_API_URL}/shorten",
+
         f"{VPLINK_API_URL}/create",
+
     ]
 
     parameter_sets = [
+
         {
             "api": VPLINK_API_KEY,
             "url": destination,
         },
+
         {
             "api_key": VPLINK_API_KEY,
             "url": destination,
         },
+
         {
             "key": VPLINK_API_KEY,
             "url": destination,
         },
+
         {
             "api": VPLINK_API_KEY,
             "link": destination,
         },
+
     ]
 
     for endpoint in endpoints:
+
         for params in parameter_sets:
+
             try:
+
                 logger.info(
                     "Trying VPLink endpoint: %s",
                     endpoint
@@ -439,10 +705,12 @@ def create_vplink(destination):
                 if not response.ok:
                     continue
 
-                content_type = response.headers.get(
-                    "content-type",
-                    ""
-                ).lower()
+                content_type = (
+                    response.headers.get(
+                        "content-type",
+                        ""
+                    ).lower()
+                )
 
                 # -----------------------------------------
                 # JSON
@@ -455,48 +723,94 @@ def create_vplink(destination):
                     except Exception:
                         data = None
 
-                    if isinstance(data, dict):
+                    if isinstance(
+                        data,
+                        dict
+                    ):
 
                         for key in [
+
                             "shortenedUrl",
+
                             "shortened_url",
+
                             "short_url",
+
                             "short",
+
                             "url",
+
                             "link",
+
                         ]:
-                            value = data.get(key)
+
+                            value = data.get(
+                                key
+                            )
 
                             if (
-                                isinstance(value, str)
-                                and value.startswith("http")
+                                isinstance(
+                                    value,
+                                    str
+                                )
+                                and value.startswith(
+                                    "http"
+                                )
                             ):
+
                                 return value
 
-                        nested = data.get("result")
+                        nested = data.get(
+                            "result"
+                        )
 
-                        if isinstance(nested, dict):
+                        if isinstance(
+                            nested,
+                            dict
+                        ):
 
                             for key in [
+
                                 "shortenedUrl",
+
                                 "shortened_url",
+
                                 "short_url",
+
                                 "short",
+
                                 "url",
+
                                 "link",
+
                             ]:
-                                value = nested.get(key)
+
+                                value = nested.get(
+                                    key
+                                )
 
                                 if (
-                                    isinstance(value, str)
-                                    and value.startswith("http")
+                                    isinstance(
+                                        value,
+                                        str
+                                    )
+                                    and value.startswith(
+                                        "http"
+                                    )
                                 ):
+
                                     return value
 
                         elif (
-                            isinstance(nested, str)
-                            and nested.startswith("http")
+                            isinstance(
+                                nested,
+                                str
+                            )
+                            and nested.startswith(
+                                "http"
+                            )
                         ):
+
                             return nested
 
                 # -----------------------------------------
@@ -509,12 +823,15 @@ def create_vplink(destination):
                     return text
 
             except Exception as e:
+
                 logger.warning(
                     "VPLink request failed: %s",
                     e
                 )
 
-    logger.error("Unable to create VPLink")
+    logger.error(
+        "Unable to create VPLink"
+    )
 
     return None
 
@@ -525,11 +842,14 @@ def create_vplink(destination):
 
 @app.get("/")
 def home():
+
     return HTMLResponse(
         """
         <!DOCTYPE html>
         <html>
+
         <head>
+
             <meta charset="UTF-8">
 
             <meta
@@ -540,36 +860,65 @@ def home():
             <title>Lozo Gateway</title>
 
             <style>
+
                 body {
+
                     margin: 0;
+
                     min-height: 100vh;
+
                     display: flex;
+
                     align-items: center;
+
                     justify-content: center;
+
                     background: #0f0f0f;
+
                     color: white;
+
                     font-family: Arial, sans-serif;
+
                 }
 
                 .box {
+
                     padding: 35px;
+
                     text-align: center;
+
                     border-radius: 18px;
+
                     background: #191919;
+
                 }
 
                 p {
+
                     color: #aaa;
+
                 }
+
             </style>
+
         </head>
 
         <body>
+
             <div class="box">
-                <h1>Lozo Gateway</h1>
-                <p>Secure gateway is active.</p>
+
+                <h1>
+                    Lozo Gateway
+                </h1>
+
+                <p>
+                    Secure gateway is active.
+                </p>
+
             </div>
+
         </body>
+
         </html>
         """
     )
@@ -583,9 +932,18 @@ def home():
 def health():
 
     result = {
+
         "ok": True,
+
         "service": "lozo-gateway",
+
         "database": db_ready(),
+
+        "token_namespaces": [
+            "bot_bot1_tokens",
+            "bot_bot2_tokens"
+        ]
+
     }
 
     if not db_ready():
@@ -593,9 +951,14 @@ def health():
         result["database_write"] = False
 
         if DB_ERROR:
+
             result["error_type"] = (
-                DB_ERROR.split(":", 1)[0]
+                DB_ERROR.split(
+                    ":",
+                    1
+                )[0]
             )
+
             result["error"] = DB_ERROR
 
         return JSONResponse(
@@ -605,10 +968,6 @@ def health():
 
     try:
 
-        # IMPORTANT:
-        # No challenge_hash field here.
-        # This prevents UNIQUE/null conflicts.
-
         test_state = (
             "__health_test__"
             + secrets.token_hex(8)
@@ -616,33 +975,49 @@ def health():
 
         db.gateway_states.insert_one(
             {
+
                 "state": test_state,
+
                 "token": "__health_test__",
+
                 "expires_at": (
                     datetime.now(timezone.utc)
                     + timedelta(minutes=1)
                 ),
+
                 "used": False,
+
                 "entry_used": False,
+
                 "verified": False,
+
             }
         )
 
         db.gateway_states.delete_one(
-            {"state": test_state}
+            {
+                "state": test_state
+            }
         )
 
         result["database_write"] = True
+
         result["message"] = (
             "MongoDB read/write working"
         )
 
-        return JSONResponse(result)
+        return JSONResponse(
+            result
+        )
 
     except Exception as e:
 
         result["database_write"] = False
-        result["error_type"] = type(e).__name__
+
+        result["error_type"] = (
+            type(e).__name__
+        )
+
         result["error"] = str(e)
 
         return JSONResponse(
@@ -664,40 +1039,76 @@ def gateway(
     token = token.strip()
 
     if not token:
+
         return error_page(
             "Invalid Link",
             "No token was provided."
         )
 
     if not db_ready():
+
         return error_page(
             "Database Error",
             "Gateway database is unavailable."
-        )
-
-    if not BOT_USERNAME:
-        return error_page(
-            "Configuration Error",
-            "Bot username is not configured."
         )
 
     # -----------------------------------------------------
     # TOKEN
     # -----------------------------------------------------
 
-    token_record = get_token_record(token)
+    token_record = get_token_record(
+        token
+    )
 
     if not token_record:
+
+        logger.warning(
+            "Token not found in bot namespaces: %s",
+            token
+        )
+
         return error_page(
             "Invalid Link",
             "This link is invalid or no longer available."
         )
 
     # -----------------------------------------------------
+    # BOT ID
+    # -----------------------------------------------------
+
+    bot_id = (
+        token_record.get(
+            "_gateway_bot_id"
+        )
+        or token_record.get(
+            "bot_id"
+        )
+        or "bot1"
+    )
+
+    bot_username = get_bot_username(
+        bot_id
+    )
+
+    if not bot_username:
+
+        logger.error(
+            "Bot username missing for %s",
+            bot_id
+        )
+
+        return error_page(
+            "Configuration Error",
+            f"Bot username for {bot_id} is not configured."
+        )
+
+    # -----------------------------------------------------
     # EXPIRY
     # -----------------------------------------------------
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(
+        timezone.utc
+    )
 
     token_expiry = token_record.get(
         "expires_at"
@@ -706,11 +1117,15 @@ def gateway(
     if token_expiry:
 
         if token_expiry.tzinfo is None:
-            token_expiry = token_expiry.replace(
-                tzinfo=timezone.utc
+
+            token_expiry = (
+                token_expiry.replace(
+                    tzinfo=timezone.utc
+                )
             )
 
         if token_expiry <= now:
+
             return error_page(
                 "Link Expired",
                 "This link has expired."
@@ -720,7 +1135,10 @@ def gateway(
     # ALREADY USED
     # -----------------------------------------------------
 
-    if token_entry_used(token):
+    if token_entry_used(
+        token
+    ):
+
         return error_page(
             "Link Already Used",
             "This gateway link has already been opened."
@@ -737,7 +1155,11 @@ def gateway(
     set_browser_cookie = False
 
     if not browser_id:
-        browser_id = secrets.token_urlsafe(32)
+
+        browser_id = (
+            secrets.token_urlsafe(32)
+        )
+
         set_browser_cookie = True
 
     browser_hash = hashlib.sha256(
@@ -749,36 +1171,55 @@ def gateway(
     # -----------------------------------------------------
 
     state = secrets.token_urlsafe(32)
+
     access_id = secrets.token_urlsafe(32)
 
     expires_at = (
         now
-        + timedelta(minutes=SESSION_MINUTES)
+        + timedelta(
+            minutes=SESSION_MINUTES
+        )
     )
 
     session = {
+
         "state": state,
+
         "token": token,
+
+        "bot_id": bot_id,
+
+        "bot_username": bot_username,
+
         "access_id": access_id,
+
         "expires_at": expires_at,
 
         "used": False,
+
         "entry_used": True,
 
         "verified": False,
+
         "verified_at": None,
+
         "verify_expires_at": None,
 
         "browser_hash": browser_hash,
 
         "created_at": now,
+
         "vplink_url": None,
+
         "verify_id": None,
+
     }
 
     try:
 
-        save_session(session)
+        save_session(
+            session
+        )
 
     except Exception as e:
 
@@ -798,7 +1239,11 @@ def gateway(
 
     complete_url = (
         f"{GATEWAY_DOMAIN}/api/complete?"
-        + urlencode({"state": state})
+        + urlencode(
+            {
+                "state": state
+            }
+        )
     )
 
     vplink_url = create_vplink(
@@ -807,7 +1252,9 @@ def gateway(
 
     if not vplink_url:
 
-        delete_session(state)
+        delete_session(
+            state
+        )
 
         return error_page(
             "Gateway Error",
@@ -864,23 +1311,31 @@ def access_page(
 ):
 
     if not db_ready():
+
         return error_page(
             "Database Error",
             "Gateway database is unavailable."
         )
 
     session = db.gateway_states.find_one(
-        {"access_id": access_id},
-        {"_id": 0}
+        {
+            "access_id": access_id
+        },
+        {
+            "_id": 0
+        }
     )
 
     if not session:
+
         return error_page(
             "Invalid Session",
             "This gateway session is invalid."
         )
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(
+        timezone.utc
+    )
 
     expires_at = session.get(
         "expires_at"
@@ -889,11 +1344,15 @@ def access_page(
     if expires_at:
 
         if expires_at.tzinfo is None:
-            expires_at = expires_at.replace(
-                tzinfo=timezone.utc
+
+            expires_at = (
+                expires_at.replace(
+                    tzinfo=timezone.utc
+                )
             )
 
         if expires_at <= now:
+
             return error_page(
                 "Session Expired",
                 "This gateway session has expired."
@@ -904,6 +1363,7 @@ def access_page(
     )
 
     if not browser_id:
+
         return error_page(
             "Invalid Browser",
             "Please reopen the original gateway link."
@@ -916,6 +1376,7 @@ def access_page(
     if browser_hash != session.get(
         "browser_hash"
     ):
+
         return error_page(
             "Browser Mismatch",
             "This session belongs to another browser."
@@ -926,6 +1387,7 @@ def access_page(
     )
 
     if not vplink_url:
+
         return error_page(
             "Gateway Error",
             "Gateway destination is unavailable."
@@ -939,8 +1401,11 @@ def access_page(
     return HTMLResponse(
         f"""
         <!DOCTYPE html>
+
         <html>
+
         <head>
+
             <meta charset="UTF-8">
 
             <meta
@@ -953,9 +1418,12 @@ def access_page(
                 content="0;url={escaped_url}"
             >
 
-            <title>Lozo Gateway</title>
+            <title>
+                Lozo Gateway
+            </title>
 
             <style>
+
                 body {{
                     margin: 0;
                     min-height: 100vh;
@@ -975,15 +1443,27 @@ def access_page(
                 p {{
                     color: #aaa;
                 }}
+
             </style>
+
         </head>
 
         <body>
+
             <div class="box">
-                <h2>Redirecting...</h2>
-                <p>Please wait...</p>
+
+                <h2>
+                    Redirecting...
+                </h2>
+
+                <p>
+                    Please wait...
+                </p>
+
             </div>
+
         </body>
+
         </html>
         """
     )
@@ -1002,20 +1482,26 @@ def complete(
     state = state.strip()
 
     if not state:
+
         return error_page(
             "Invalid Session",
             "No gateway state was provided."
         )
 
-    session = get_session(state)
+    session = get_session(
+        state
+    )
 
     if not session:
+
         return error_page(
             "Invalid Session",
             "This gateway session is invalid."
         )
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(
+        timezone.utc
+    )
 
     expires_at = session.get(
         "expires_at"
@@ -1024,20 +1510,29 @@ def complete(
     if expires_at:
 
         if expires_at.tzinfo is None:
-            expires_at = expires_at.replace(
-                tzinfo=timezone.utc
+
+            expires_at = (
+                expires_at.replace(
+                    tzinfo=timezone.utc
+                )
             )
 
         if expires_at <= now:
+
             return error_page(
                 "Session Expired",
                 "This gateway session has expired."
             )
 
-    if session.get("used"):
+    if session.get(
+        "used"
+    ):
 
         return RedirectResponse(
-            url=f"/api/deliver?state={state}",
+            url=(
+                f"/api/deliver?"
+                f"state={state}"
+            ),
             status_code=302
         )
 
@@ -1050,6 +1545,7 @@ def complete(
     )
 
     if not browser_id:
+
         return error_page(
             "Browser Mismatch",
             "Please continue in the same browser."
@@ -1062,6 +1558,7 @@ def complete(
     if browser_hash != session.get(
         "browser_hash"
     ):
+
         return error_page(
             "Browser Mismatch",
             "This session belongs to another browser."
@@ -1071,10 +1568,15 @@ def complete(
     # ALREADY VERIFIED
     # -----------------------------------------------------
 
-    if session.get("verified"):
+    if session.get(
+        "verified"
+    ):
 
         return RedirectResponse(
-            url=f"/api/deliver?state={state}",
+            url=(
+                f"/api/deliver?"
+                f"state={state}"
+            ),
             status_code=302
         )
 
@@ -1082,9 +1584,13 @@ def complete(
     # CREATE VERIFY CHALLENGE
     # -----------------------------------------------------
 
-    verify_id = secrets.token_urlsafe(32)
+    verify_id = secrets.token_urlsafe(
+        32
+    )
 
-    challenge = secrets.token_urlsafe(32)
+    challenge = secrets.token_urlsafe(
+        32
+    )
 
     challenge_hash = hashlib.sha256(
         challenge.encode()
@@ -1092,15 +1598,21 @@ def complete(
 
     verify_expires_at = (
         now
-        + timedelta(minutes=VERIFY_MINUTES)
+        + timedelta(
+            minutes=VERIFY_MINUTES
+        )
     )
 
     update_session(
         state,
         {
             "verify_id": verify_id,
-            "challenge_hash": challenge_hash,
-            "verify_expires_at": verify_expires_at,
+
+            "challenge_hash":
+                challenge_hash,
+
+            "verify_expires_at":
+                verify_expires_at,
         }
     )
 
@@ -1117,8 +1629,11 @@ def complete(
     return HTMLResponse(
         f"""
         <!DOCTYPE html>
+
         <html>
+
         <head>
+
             <meta charset="UTF-8">
 
             <meta
@@ -1126,9 +1641,12 @@ def complete(
                 content="width=device-width, initial-scale=1.0"
             >
 
-            <title>Verification</title>
+            <title>
+                Verification
+            </title>
 
             <style>
+
                 body {{
                     margin: 0;
                     min-height: 100vh;
@@ -1175,12 +1693,18 @@ def complete(
                     color: #777;
                     font-size: 13px;
                 }}
+
             </style>
+
         </head>
 
         <body>
+
             <div class="box">
-                <h1>Verification Required</h1>
+
+                <h1>
+                    Verification Required
+                </h1>
 
                 <p>
                     Complete the verification to continue.
@@ -1196,8 +1720,11 @@ def complete(
                 <div class="brand">
                     Lozo Gateway
                 </div>
+
             </div>
+
         </body>
+
         </html>
         """
     )
@@ -1219,12 +1746,15 @@ def verify(
     )
 
     if not session:
+
         return error_page(
             "Invalid Verification",
             "This verification session is invalid."
         )
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(
+        timezone.utc
+    )
 
     # -----------------------------------------------------
     # BROWSER
@@ -1235,6 +1765,7 @@ def verify(
     )
 
     if not browser_id:
+
         return error_page(
             "Browser Mismatch",
             "Please continue in the same browser."
@@ -1247,6 +1778,7 @@ def verify(
     if browser_hash != session.get(
         "browser_hash"
     ):
+
         return error_page(
             "Browser Mismatch",
             "This session belongs to another browser."
@@ -1261,17 +1793,22 @@ def verify(
     )
 
     if not verify_expires_at:
+
         return error_page(
             "Verification Expired",
             "This verification session is no longer valid."
         )
 
     if verify_expires_at.tzinfo is None:
-        verify_expires_at = verify_expires_at.replace(
-            tzinfo=timezone.utc
+
+        verify_expires_at = (
+            verify_expires_at.replace(
+                tzinfo=timezone.utc
+            )
         )
 
     if verify_expires_at <= now:
+
         return error_page(
             "Verification Expired",
             "Please start the gateway again."
@@ -1289,7 +1826,11 @@ def verify(
         challenge.encode()
     ).hexdigest()
 
-    if not challenge or actual_hash != expected_hash:
+    if (
+        not challenge
+        or actual_hash != expected_hash
+    ):
+
         return error_page(
             "Invalid Verification",
             "The verification challenge is invalid."
@@ -1340,20 +1881,26 @@ def deliver(
     state = state.strip()
 
     if not state:
+
         return error_page(
             "Invalid Session",
             "No session was provided."
         )
 
-    session = get_session(state)
+    session = get_session(
+        state
+    )
 
     if not session:
+
         return error_page(
             "Invalid Session",
             "This gateway session is invalid."
         )
 
-    now = datetime.now(timezone.utc)
+    now = datetime.now(
+        timezone.utc
+    )
 
     # -----------------------------------------------------
     # BROWSER
@@ -1364,6 +1911,7 @@ def deliver(
     )
 
     if not browser_id:
+
         return error_page(
             "Browser Mismatch",
             "Please continue in the same browser."
@@ -1376,6 +1924,7 @@ def deliver(
     if browser_hash != session.get(
         "browser_hash"
     ):
+
         return error_page(
             "Browser Mismatch",
             "This session belongs to another browser."
@@ -1392,11 +1941,15 @@ def deliver(
     if expires_at:
 
         if expires_at.tzinfo is None:
-            expires_at = expires_at.replace(
-                tzinfo=timezone.utc
+
+            expires_at = (
+                expires_at.replace(
+                    tzinfo=timezone.utc
+                )
             )
 
         if expires_at <= now:
+
             return error_page(
                 "Session Expired",
                 "This gateway session has expired."
@@ -1410,9 +1963,12 @@ def deliver(
         "lozo_verified"
     )
 
-    if not session.get("verified"):
+    if not session.get(
+        "verified"
+    ):
 
         if verified_cookie != "1":
+
             return error_page(
                 "Verification Required",
                 "Please complete verification first."
@@ -1429,11 +1985,15 @@ def deliver(
     if verify_expires_at:
 
         if verify_expires_at.tzinfo is None:
-            verify_expires_at = verify_expires_at.replace(
-                tzinfo=timezone.utc
+
+            verify_expires_at = (
+                verify_expires_at.replace(
+                    tzinfo=timezone.utc
+                )
             )
 
         if verify_expires_at <= now:
+
             return error_page(
                 "Verification Expired",
                 "Please start the gateway again."
@@ -1443,7 +2003,10 @@ def deliver(
     # ALREADY DELIVERED
     # -----------------------------------------------------
 
-    if session.get("used"):
+    if session.get(
+        "used"
+    ):
+
         return error_page(
             "Link Already Used",
             "This gateway session has already been used."
@@ -1458,6 +2021,7 @@ def deliver(
     )
 
     if not original_token:
+
         return error_page(
             "Gateway Error",
             "Original token is missing."
@@ -1468,10 +2032,15 @@ def deliver(
     )
 
     if not token_record:
+
         return error_page(
             "Invalid Link",
             "The original token no longer exists."
         )
+
+    # -----------------------------------------------------
+    # TOKEN EXPIRY
+    # -----------------------------------------------------
 
     token_expiry = token_record.get(
         "expires_at"
@@ -1480,15 +2049,52 @@ def deliver(
     if token_expiry:
 
         if token_expiry.tzinfo is None:
-            token_expiry = token_expiry.replace(
-                tzinfo=timezone.utc
+
+            token_expiry = (
+                token_expiry.replace(
+                    tzinfo=timezone.utc
+                )
             )
 
         if token_expiry <= now:
+
             return error_page(
                 "Link Expired",
                 "This file link has expired."
             )
+
+    # -----------------------------------------------------
+    # DETERMINE CORRECT BOT
+    # -----------------------------------------------------
+
+    bot_id = (
+        session.get(
+            "bot_id"
+        )
+        or token_record.get(
+            "_gateway_bot_id"
+        )
+        or token_record.get(
+            "bot_id"
+        )
+        or "bot1"
+    )
+
+    bot_username = (
+        session.get(
+            "bot_username"
+        )
+        or get_bot_username(
+            bot_id
+        )
+    )
+
+    if not bot_username:
+
+        return error_page(
+            "Configuration Error",
+            f"Bot username for {bot_id} is not configured."
+        )
 
     # -----------------------------------------------------
     # MARK SESSION USED
@@ -1508,6 +2114,7 @@ def deliver(
     )
 
     if result.modified_count != 1:
+
         return error_page(
             "Link Already Used",
             "This gateway session has already been used."
@@ -1518,8 +2125,14 @@ def deliver(
     # -----------------------------------------------------
 
     telegram_url = (
-        f"https://t.me/{BOT_USERNAME}"
+        f"https://t.me/{bot_username}"
         f"?start=verify_{original_token}"
+    )
+
+    logger.info(
+        "Gateway delivery: bot=%s username=%s",
+        bot_id,
+        bot_username
     )
 
     response = RedirectResponse(
@@ -1556,6 +2169,7 @@ def debug_session(
 ):
 
     if not state:
+
         return JSONResponse(
             {
                 "ok": False,
@@ -1564,9 +2178,12 @@ def debug_session(
             status_code=400
         )
 
-    session = get_session(state)
+    session = get_session(
+        state
+    )
 
     if not session:
+
         return JSONResponse(
             {
                 "ok": False,
@@ -1575,7 +2192,9 @@ def debug_session(
             status_code=404
         )
 
-    safe = dict(session)
+    safe = dict(
+        session
+    )
 
     safe.pop(
         "browser_hash",
