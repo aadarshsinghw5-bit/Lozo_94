@@ -16,15 +16,11 @@ from pymongo import MongoClient, ASCENDING
 # CONFIG
 # =========================================================
 
-# Bot 1 username
-# Existing BOT_USERNAME env variable can remain as it is.
 BOT_USERNAME = os.getenv(
     "BOT_USERNAME",
     ""
 ).replace("@", "").strip()
 
-# Bot 2 username
-# Add BOT2_USERNAME in Vercel environment variables.
 BOT2_USERNAME = os.getenv(
     "BOT2_USERNAME",
     ""
@@ -40,15 +36,42 @@ MONGO_DB = os.getenv(
     "file_store_bot"
 ).strip()
 
-VPLINK_API_URL = os.getenv(
-    "VPLINK_API_URL",
-    "https://vplink.in/api"
+
+# =========================================================
+# UNIVERSAL SHORTENER
+#
+# New variables:
+#
+# SHORTENER_API_URL
+# SHORTENER_API_KEY
+#
+# Old VPLink variables are kept as fallback.
+# =========================================================
+
+SHORTENER_API_URL = os.getenv(
+    "SHORTENER_API_URL",
+    ""
 ).strip().rstrip("/")
 
-VPLINK_API_KEY = os.getenv(
-    "VPLINK_API_KEY",
+SHORTENER_API_KEY = os.getenv(
+    "SHORTENER_API_KEY",
     ""
 ).strip()
+
+
+# Legacy VPLink fallback
+if not SHORTENER_API_URL:
+    SHORTENER_API_URL = os.getenv(
+        "VPLINK_API_URL",
+        "https://vplink.in/api"
+    ).strip().rstrip("/")
+
+if not SHORTENER_API_KEY:
+    SHORTENER_API_KEY = os.getenv(
+        "VPLINK_API_KEY",
+        ""
+    ).strip()
+
 
 GATEWAY_DOMAIN = os.getenv(
     "GATEWAY_DOMAIN",
@@ -95,16 +118,25 @@ DB_ERROR = None
 
 
 def initialize_database():
-    global mongo, db, DB_ERROR
+
+    global mongo
+    global db
+    global DB_ERROR
 
     DB_ERROR = None
 
     if not MONGO_URI:
+
         DB_ERROR = "MONGO_URI is not configured"
-        logger.error(DB_ERROR)
+
+        logger.error(
+            DB_ERROR
+        )
+
         return False
 
     try:
+
         mongo = MongoClient(
             MONGO_URI,
             serverSelectionTimeoutMS=10000,
@@ -116,16 +148,9 @@ def initialize_database():
 
         db = mongo[MONGO_DB]
 
-        # =================================================
-        # TOKEN INDEXES
-        #
-        # Tokens are now stored separately:
-        #
-        # bot_bot1_tokens
-        # bot_bot2_tokens
-        #
-        # Keep legacy tokens collection indexed too.
-        # =================================================
+        # -------------------------------------------------
+        # TOKEN COLLECTIONS
+        # -------------------------------------------------
 
         token_collections = [
             "bot_bot1_tokens",
@@ -138,12 +163,13 @@ def initialize_database():
             collection = db[collection_name]
 
             try:
-                token_indexes = {
+
+                indexes = {
                     idx["name"]: idx
                     for idx in collection.list_indexes()
                 }
 
-                token_index = token_indexes.get(
+                token_index = indexes.get(
                     "token_1"
                 )
 
@@ -153,10 +179,6 @@ def initialize_database():
                         "unique",
                         False
                     ):
-                        logger.info(
-                            "Fixing %s.token_1 -> UNIQUE",
-                            collection_name
-                        )
 
                         collection.drop_index(
                             "token_1"
@@ -184,17 +206,16 @@ def initialize_database():
                     e
                 )
 
-        # =================================================
+        # -------------------------------------------------
         # GATEWAY STATE INDEX
-        # state must be UNIQUE
-        # =================================================
+        # -------------------------------------------------
 
-        gateway_indexes = {
+        indexes = {
             idx["name"]: idx
             for idx in db.gateway_states.list_indexes()
         }
 
-        state_index = gateway_indexes.get(
+        state_index = indexes.get(
             "state_1"
         )
 
@@ -204,10 +225,6 @@ def initialize_database():
                 "unique",
                 False
             ):
-
-                logger.info(
-                    "Fixing gateway_states.state_1 -> UNIQUE"
-                )
 
                 db.gateway_states.drop_index(
                     "state_1"
@@ -227,32 +244,27 @@ def initialize_database():
                 unique=True
             )
 
-        # =================================================
-        # GATEWAY TOKEN INDEX
+        # -------------------------------------------------
+        # TOKEN INDEX
         #
-        # token must NOT be UNIQUE because the same token
-        # may have multiple historical gateway states.
-        # =================================================
+        # Multiple gateway sessions may use same token.
+        # -------------------------------------------------
 
-        gateway_indexes = {
+        indexes = {
             idx["name"]: idx
             for idx in db.gateway_states.list_indexes()
         }
 
-        gateway_token_index = gateway_indexes.get(
+        token_index = indexes.get(
             "token_1"
         )
 
-        if gateway_token_index:
+        if token_index:
 
-            if gateway_token_index.get(
+            if token_index.get(
                 "unique",
                 False
             ):
-
-                logger.info(
-                    "Removing old UNIQUE gateway_states.token_1"
-                )
 
                 db.gateway_states.drop_index(
                     "token_1"
@@ -272,27 +284,16 @@ def initialize_database():
                 unique=False
             )
 
-        # =================================================
-        # CHALLENGE HASH INDEX
-        #
-        # Do NOT keep this index.
-        # Older deployments may have created it.
-        # =================================================
+        # -------------------------------------------------
+        # REMOVE OLD CHALLENGE HASH INDEX
+        # -------------------------------------------------
 
-        gateway_indexes = {
+        indexes = {
             idx["name"]: idx
             for idx in db.gateway_states.list_indexes()
         }
 
-        challenge_index = gateway_indexes.get(
-            "challenge_hash_1"
-        )
-
-        if challenge_index:
-
-            logger.info(
-                "Removing obsolete gateway_states.challenge_hash_1"
-            )
+        if "challenge_hash_1" in indexes:
 
             db.gateway_states.drop_index(
                 "challenge_hash_1"
@@ -301,14 +302,6 @@ def initialize_database():
         logger.info(
             "MongoDB connected successfully: %s",
             MONGO_DB
-        )
-
-        logger.info(
-            "MongoDB indexes verified successfully."
-        )
-
-        logger.info(
-            "Dual-bot token namespaces enabled."
         )
 
         return True
@@ -342,29 +335,11 @@ def db_ready():
 # =========================================================
 
 def get_token_record(token):
-    """
-    Search token inside both bot namespaces.
-
-    Bot 1:
-        bot_bot1_tokens
-
-    Bot 2:
-        bot_bot2_tokens
-
-    Legacy:
-        tokens
-
-    Returns:
-        token record or None
-    """
 
     if not db_ready():
         return None
 
-    # -----------------------------------------------------
     # Bot 1
-    # -----------------------------------------------------
-
     try:
 
         record = db.bot_bot1_tokens.find_one(
@@ -385,10 +360,7 @@ def get_token_record(token):
             e
         )
 
-    # -----------------------------------------------------
     # Bot 2
-    # -----------------------------------------------------
-
     try:
 
         record = db.bot_bot2_tokens.find_one(
@@ -409,12 +381,7 @@ def get_token_record(token):
             e
         )
 
-    # -----------------------------------------------------
-    # Legacy tokens collection
-    #
-    # Keeps old Bot 1 links working if any still exist.
-    # -----------------------------------------------------
-
+    # Legacy
     try:
 
         record = db.tokens.find_one(
@@ -442,15 +409,13 @@ def get_token_record(token):
 
 
 def get_bot_username(bot_id):
-    """
-    Resolve Telegram username according to token namespace.
-    """
 
     bot_id = str(
         bot_id or "bot1"
     ).strip().lower()
 
     if bot_id == "bot2":
+
         return BOT2_USERNAME
 
     return BOT_USERNAME
@@ -460,89 +425,93 @@ def get_bot_username(bot_id):
 # ERROR PAGE
 # =========================================================
 
-def error_page(title, message):
+def error_page(
+    title,
+    message
+):
 
     return HTMLResponse(
         f"""
-        <!DOCTYPE html>
-        <html>
-        <head>
+<!DOCTYPE html>
+<html>
 
-            <meta charset="UTF-8">
+<head>
 
-            <meta
-                name="viewport"
-                content="width=device-width, initial-scale=1.0"
-            >
+<meta charset="UTF-8">
 
-            <title>{html.escape(title)}</title>
+<meta
+    name="viewport"
+    content="width=device-width, initial-scale=1.0"
+>
 
-            <style>
+<title>{html.escape(title)}</title>
 
-                body {{
-                    margin: 0;
-                    min-height: 100vh;
-                    display: flex;
-                    align-items: center;
-                    justify-content: center;
-                    background: #0f0f0f;
-                    color: white;
-                    font-family: Arial, sans-serif;
-                }}
+<style>
 
-                .box {{
-                    width: 90%;
-                    max-width: 430px;
-                    padding: 30px;
-                    box-sizing: border-box;
-                    text-align: center;
-                    border-radius: 18px;
-                    background: #191919;
-                    box-shadow:
-                        0 10px 40px rgba(0,0,0,.4);
-                }}
+body {{
+    margin: 0;
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: #0f0f0f;
+    color: white;
+    font-family: Arial, sans-serif;
+}}
 
-                h1 {{
-                    margin-bottom: 15px;
-                    font-size: 25px;
-                }}
+.box {{
+    width: 90%;
+    max-width: 430px;
+    padding: 30px;
+    box-sizing: border-box;
+    text-align: center;
+    border-radius: 18px;
+    background: #191919;
+    box-shadow: 0 10px 40px rgba(0,0,0,.4);
+}}
 
-                p {{
-                    color: #bdbdbd;
-                    line-height: 1.6;
-                }}
+h1 {{
+    margin-bottom: 15px;
+    font-size: 25px;
+}}
 
-                .brand {{
-                    margin-top: 25px;
-                    font-size: 13px;
-                    color: #777;
-                }}
+p {{
+    color: #bdbdbd;
+    line-height: 1.6;
+}}
 
-            </style>
+.brand {{
+    margin-top: 25px;
+    font-size: 13px;
+    color: #777;
+}}
 
-        </head>
+</style>
 
-        <body>
+</head>
 
-            <div class="box">
+<body>
 
-                <h1>
-                    {html.escape(title)}
-                </h1>
+<div class="box">
 
-                <p>
-                    {html.escape(message)}
-                </p>
+<h1>
+{html.escape(title)}
+</h1>
 
-                <div class="brand">
-                    Lozo Gateway
-                </div>
+<p>
+{html.escape(message)}
+</p>
 
-            </div>
+<div class="brand">
+Lozo Gateway
+</div>
 
-        </body>
-        </html>
-        """,
+</div>
+
+</body>
+
+</html>
+""",
         status_code=400
     )
 
@@ -550,23 +519,6 @@ def error_page(title, message):
 # =========================================================
 # DATABASE HELPERS
 # =========================================================
-
-def token_entry_used(token):
-
-    if not db_ready():
-        return False
-
-    return (
-        db.gateway_states.find_one(
-            {
-                "token": token,
-                "entry_used": True
-            },
-            {"_id": 1}
-        )
-        is not None
-    )
-
 
 def get_session(state):
 
@@ -633,48 +585,425 @@ def delete_session(state):
 
 
 # =========================================================
-# VPLINK
+# UNIVERSAL SHORTENER
 # =========================================================
 
-def create_vplink(destination):
+PROVIDER_NAMES = (
+    "vplink",
+    "vplinks",
+    "arolinks",
+    "shortxlinks",
+    "instantlinks",
+    "rempo",
+    "remso",
+    "babylinks",
+    "linkshortify",
+    "bitly",
+    "rebrandly",
+    "short.io",
+    "shortio",
+    "shrinkme",
+)
 
-    if not VPLINK_API_KEY:
 
-        logger.error(
-            "VPLINK_API_KEY is missing"
+SHORT_URL_KEYS = (
+    "shortenedUrl",
+    "shortened_url",
+    "short_url",
+    "shortUrl",
+    "short",
+    "shortLink",
+    "short_link",
+    "shortened",
+    "link",
+    "url",
+)
+
+
+def shortener_provider():
+
+    value = (
+        SHORTENER_API_URL
+        or ""
+    ).lower()
+
+    for name in PROVIDER_NAMES:
+
+        if name in value:
+
+            return name
+
+    return "generic"
+
+
+def extract_short_url(data):
+
+    if isinstance(
+        data,
+        str
+    ):
+
+        value = data.strip()
+
+        if value.startswith(
+            "http://"
+        ) or value.startswith(
+            "https://"
+        ):
+
+            return value
+
+        return None
+
+    if isinstance(
+        data,
+        dict
+    ):
+
+        # Direct keys
+        for key in SHORT_URL_KEYS:
+
+            value = data.get(
+                key
+            )
+
+            if isinstance(
+                value,
+                str
+            ):
+
+                value = value.strip()
+
+                if value.startswith(
+                    "http://"
+                ) or value.startswith(
+                    "https://"
+                ):
+
+                    return value
+
+        # Common nested objects
+        for key in (
+            "result",
+            "data",
+            "response",
+            "link",
+            "resultData",
+        ):
+
+            nested = data.get(
+                key
+            )
+
+            result = extract_short_url(
+                nested
+            )
+
+            if result:
+
+                return result
+
+    if isinstance(
+        data,
+        list
+    ):
+
+        for item in data:
+
+            result = extract_short_url(
+                item
+            )
+
+            if result:
+
+                return result
+
+    return None
+
+
+def parse_shortener_response(
+    response
+):
+
+    if not response.ok:
+
+        logger.warning(
+            "Shortener HTTP %s: %s",
+            response.status_code,
+            response.text[:500]
         )
 
         return None
 
-    endpoints = [
+    try:
 
-        VPLINK_API_URL,
+        data = response.json()
 
-        f"{VPLINK_API_URL}/shorten",
+        result = extract_short_url(
+            data
+        )
 
-        f"{VPLINK_API_URL}/create",
+        if result:
+
+            return result
+
+    except Exception:
+        pass
+
+    text = response.text.strip()
+
+    if text.startswith(
+        "http://"
+    ) or text.startswith(
+        "https://"
+    ):
+
+        return text
+
+    return None
+
+
+def unique_endpoints():
+
+    base = (
+        SHORTENER_API_URL
+        or ""
+    ).rstrip("/")
+
+    values = [
+
+        base,
+
+        f"{base}/shorten",
+
+        f"{base}/create",
+
+        f"{base}/api/shorten",
+
+        f"{base}/api/create",
+
+        f"{base}/api/v1/shorten",
+
+        f"{base}/api/v1/shorten/",
 
     ]
 
-    parameter_sets = [
+    result = []
+
+    for value in values:
+
+        if value and value not in result:
+
+            result.append(value)
+
+    return result
+
+
+def create_bitly(
+    destination
+):
+
+    headers = {
+        "Authorization":
+            f"Bearer {SHORTENER_API_KEY}",
+        "Content-Type":
+            "application/json",
+    }
+
+    payload = {
+        "long_url": destination
+    }
+
+    try:
+
+        response = requests.post(
+            "https://api-ssl.bitly.com/v4/shorten",
+            headers=headers,
+            json=payload,
+            timeout=20
+        )
+
+        if response.ok:
+
+            data = response.json()
+
+            result = (
+                data.get("link")
+                or data.get("url")
+            )
+
+            if result:
+                return result
+
+    except Exception as e:
+
+        logger.warning(
+            "Bitly failed: %s",
+            e
+        )
+
+    return None
+
+
+def create_rebrandly(
+    destination
+):
+
+    headers = {
+        "apikey":
+            SHORTENER_API_KEY,
+        "Content-Type":
+            "application/json",
+    }
+
+    payload = {
+        "destination": destination
+    }
+
+    try:
+
+        response = requests.post(
+            "https://api.rebrandly.com/v1/links",
+            headers=headers,
+            json=payload,
+            timeout=20
+        )
+
+        if response.ok:
+
+            data = response.json()
+
+            short_url = extract_short_url(
+                data
+            )
+
+            if short_url:
+                return short_url
+
+            short = data.get(
+                "shortUrl"
+            )
+
+            if short:
+
+                return (
+                    "https://"
+                    + str(short).lstrip(
+                        "/"
+                    )
+                )
+
+    except Exception as e:
+
+        logger.warning(
+            "Rebrandly failed: %s",
+            e
+        )
+
+    return None
+
+
+def create_shortio(
+    destination
+):
+
+    headers = {
+        "Authorization":
+            SHORTENER_API_KEY,
+        "Content-Type":
+            "application/json",
+    }
+
+    payload = {
+        "originalURL": destination
+    }
+
+    try:
+
+        response = requests.post(
+            "https://api.short.io/links",
+            headers=headers,
+            json=payload,
+            timeout=20
+        )
+
+        if response.ok:
+
+            data = response.json()
+
+            result = extract_short_url(
+                data
+            )
+
+            if result:
+                return result
+
+            domain = data.get(
+                "shortURL"
+            )
+
+            if domain:
+                return domain
+
+    except Exception as e:
+
+        logger.warning(
+            "Short.io failed: %s",
+            e
+        )
+
+    return None
+
+
+def create_generic_shortener(
+    destination
+):
+
+    endpoints = unique_endpoints()
+
+    # -----------------------------------------------------
+    # GET
+    # -----------------------------------------------------
+
+    get_parameters = [
 
         {
-            "api": VPLINK_API_KEY,
+            "api": SHORTENER_API_KEY,
             "url": destination,
         },
 
         {
-            "api_key": VPLINK_API_KEY,
+            "api_key": SHORTENER_API_KEY,
             "url": destination,
         },
 
         {
-            "key": VPLINK_API_KEY,
+            "key": SHORTENER_API_KEY,
             "url": destination,
         },
 
         {
-            "api": VPLINK_API_KEY,
+            "token": SHORTENER_API_KEY,
+            "url": destination,
+        },
+
+        {
+            "apikey": SHORTENER_API_KEY,
+            "url": destination,
+        },
+
+        {
+            "api": SHORTENER_API_KEY,
+            "link": destination,
+        },
+
+        {
+            "api_key": SHORTENER_API_KEY,
+            "link": destination,
+        },
+
+        {
+            "key": SHORTENER_API_KEY,
             "link": destination,
         },
 
@@ -682,155 +1011,236 @@ def create_vplink(destination):
 
     for endpoint in endpoints:
 
-        for params in parameter_sets:
+        for params in get_parameters:
 
             try:
 
                 logger.info(
-                    "Trying VPLink endpoint: %s",
+                    "Shortener GET: %s",
                     endpoint
                 )
 
                 response = requests.get(
                     endpoint,
                     params=params,
-                    timeout=15
+                    timeout=20
                 )
 
-                logger.info(
-                    "VPLink response status: %s",
-                    response.status_code
+                result = parse_shortener_response(
+                    response
                 )
 
-                if not response.ok:
-                    continue
+                if result:
 
-                content_type = (
-                    response.headers.get(
-                        "content-type",
-                        ""
-                    ).lower()
-                )
-
-                # -----------------------------------------
-                # JSON
-                # -----------------------------------------
-
-                if "application/json" in content_type:
-
-                    try:
-                        data = response.json()
-                    except Exception:
-                        data = None
-
-                    if isinstance(
-                        data,
-                        dict
-                    ):
-
-                        for key in [
-
-                            "shortenedUrl",
-
-                            "shortened_url",
-
-                            "short_url",
-
-                            "short",
-
-                            "url",
-
-                            "link",
-
-                        ]:
-
-                            value = data.get(
-                                key
-                            )
-
-                            if (
-                                isinstance(
-                                    value,
-                                    str
-                                )
-                                and value.startswith(
-                                    "http"
-                                )
-                            ):
-
-                                return value
-
-                        nested = data.get(
-                            "result"
-                        )
-
-                        if isinstance(
-                            nested,
-                            dict
-                        ):
-
-                            for key in [
-
-                                "shortenedUrl",
-
-                                "shortened_url",
-
-                                "short_url",
-
-                                "short",
-
-                                "url",
-
-                                "link",
-
-                            ]:
-
-                                value = nested.get(
-                                    key
-                                )
-
-                                if (
-                                    isinstance(
-                                        value,
-                                        str
-                                    )
-                                    and value.startswith(
-                                        "http"
-                                    )
-                                ):
-
-                                    return value
-
-                        elif (
-                            isinstance(
-                                nested,
-                                str
-                            )
-                            and nested.startswith(
-                                "http"
-                            )
-                        ):
-
-                            return nested
-
-                # -----------------------------------------
-                # RAW TEXT
-                # -----------------------------------------
-
-                text = response.text.strip()
-
-                if text.startswith("http"):
-                    return text
+                    return result
 
             except Exception as e:
 
                 logger.warning(
-                    "VPLink request failed: %s",
+                    "Shortener GET failed: %s",
                     e
                 )
 
+    # -----------------------------------------------------
+    # POST JSON
+    # -----------------------------------------------------
+
+    post_payloads = [
+
+        {
+            "url": destination,
+            "api": SHORTENER_API_KEY,
+        },
+
+        {
+            "url": destination,
+            "api_key": SHORTENER_API_KEY,
+        },
+
+        {
+            "url": destination,
+            "key": SHORTENER_API_KEY,
+        },
+
+        {
+            "link": destination,
+            "api": SHORTENER_API_KEY,
+        },
+
+        {
+            "link": destination,
+            "api_key": SHORTENER_API_KEY,
+        },
+
+        {
+            "originalURL": destination,
+            "api": SHORTENER_API_KEY,
+        },
+
+        {
+            "long_url": destination,
+            "api": SHORTENER_API_KEY,
+        },
+
+        {
+            "destination": destination,
+            "api": SHORTENER_API_KEY,
+        },
+
+    ]
+
+    for endpoint in endpoints:
+
+        for payload in post_payloads:
+
+            try:
+
+                logger.info(
+                    "Shortener POST JSON: %s",
+                    endpoint
+                )
+
+                response = requests.post(
+                    endpoint,
+                    json=payload,
+                    timeout=20
+                )
+
+                result = parse_shortener_response(
+                    response
+                )
+
+                if result:
+
+                    return result
+
+            except Exception as e:
+
+                logger.warning(
+                    "Shortener POST JSON failed: %s",
+                    e
+                )
+
+    # -----------------------------------------------------
+    # POST FORM
+    # -----------------------------------------------------
+
+    for endpoint in endpoints:
+
+        for payload in post_payloads:
+
+            try:
+
+                response = requests.post(
+                    endpoint,
+                    data=payload,
+                    timeout=20
+                )
+
+                result = parse_shortener_response(
+                    response
+                )
+
+                if result:
+
+                    return result
+
+            except Exception as e:
+
+                logger.warning(
+                    "Shortener POST form failed: %s",
+                    e
+                )
+
+    return None
+
+
+def create_shortener_link(
+    destination
+):
+
+    if not SHORTENER_API_URL:
+
+        logger.error(
+            "SHORTENER_API_URL is missing"
+        )
+
+        return None
+
+    if not SHORTENER_API_KEY:
+
+        logger.error(
+            "SHORTENER_API_KEY is missing"
+        )
+
+        return None
+
+    provider = shortener_provider()
+
+    logger.info(
+        "Using shortener provider: %s",
+        provider
+    )
+
+    # -----------------------------------------------------
+    # BITLY
+    # -----------------------------------------------------
+
+    if provider == "bitly":
+
+        result = create_bitly(
+            destination
+        )
+
+        if result:
+            return result
+
+    # -----------------------------------------------------
+    # REBRANDLY
+    # -----------------------------------------------------
+
+    if provider == "rebrandly":
+
+        result = create_rebrandly(
+            destination
+        )
+
+        if result:
+            return result
+
+    # -----------------------------------------------------
+    # SHORT.IO
+    # -----------------------------------------------------
+
+    if provider in (
+        "short.io",
+        "shortio",
+    ):
+
+        result = create_shortio(
+            destination
+        )
+
+        if result:
+            return result
+
+    # -----------------------------------------------------
+    # GENERIC
+    #
+    # Works with common URL/key based APIs including
+    # VPLink-style APIs.
+    # -----------------------------------------------------
+
+    result = create_generic_shortener(
+        destination
+    )
+
+    if result:
+
+        return result
+
     logger.error(
-        "Unable to create VPLink"
+        "Unable to create shortener link"
     )
 
     return None
@@ -845,82 +1255,66 @@ def home():
 
     return HTMLResponse(
         """
-        <!DOCTYPE html>
-        <html>
+<!DOCTYPE html>
+<html>
 
-        <head>
+<head>
 
-            <meta charset="UTF-8">
+<meta charset="UTF-8">
 
-            <meta
-                name="viewport"
-                content="width=device-width, initial-scale=1.0"
-            >
+<meta
+    name="viewport"
+    content="width=device-width, initial-scale=1.0"
+>
 
-            <title>Lozo Gateway</title>
+<title>Lozo Gateway</title>
 
-            <style>
+<style>
 
-                body {
+body {
+    margin: 0;
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: #0f0f0f;
+    color: white;
+    font-family: Arial, sans-serif;
+}
 
-                    margin: 0;
+.box {
+    padding: 35px;
+    text-align: center;
+    border-radius: 18px;
+    background: #191919;
+}
 
-                    min-height: 100vh;
+p {
+    color: #aaa;
+}
 
-                    display: flex;
+</style>
 
-                    align-items: center;
+</head>
 
-                    justify-content: center;
+<body>
 
-                    background: #0f0f0f;
+<div class="box">
 
-                    color: white;
+<h1>
+Lozo Gateway
+</h1>
 
-                    font-family: Arial, sans-serif;
+<p>
+Secure gateway is active.
+</p>
 
-                }
+</div>
 
-                .box {
+</body>
 
-                    padding: 35px;
-
-                    text-align: center;
-
-                    border-radius: 18px;
-
-                    background: #191919;
-
-                }
-
-                p {
-
-                    color: #aaa;
-
-                }
-
-            </style>
-
-        </head>
-
-        <body>
-
-            <div class="box">
-
-                <h1>
-                    Lozo Gateway
-                </h1>
-
-                <p>
-                    Secure gateway is active.
-                </p>
-
-            </div>
-
-        </body>
-
-        </html>
-        """
+</html>
+"""
     )
 
 
@@ -932,98 +1326,23 @@ def home():
 def health():
 
     result = {
-
         "ok": True,
-
         "service": "lozo-gateway",
-
         "database": db_ready(),
-
+        "shortener": bool(
+            SHORTENER_API_URL
+            and SHORTENER_API_KEY
+        ),
         "token_namespaces": [
             "bot_bot1_tokens",
-            "bot_bot2_tokens"
-        ]
-
+            "bot_bot2_tokens",
+            "tokens",
+        ],
     }
 
-    if not db_ready():
-
-        result["database_write"] = False
-
-        if DB_ERROR:
-
-            result["error_type"] = (
-                DB_ERROR.split(
-                    ":",
-                    1
-                )[0]
-            )
-
-            result["error"] = DB_ERROR
-
-        return JSONResponse(
-            result,
-            status_code=500
-        )
-
-    try:
-
-        test_state = (
-            "__health_test__"
-            + secrets.token_hex(8)
-        )
-
-        db.gateway_states.insert_one(
-            {
-
-                "state": test_state,
-
-                "token": "__health_test__",
-
-                "expires_at": (
-                    datetime.now(timezone.utc)
-                    + timedelta(minutes=1)
-                ),
-
-                "used": False,
-
-                "entry_used": False,
-
-                "verified": False,
-
-            }
-        )
-
-        db.gateway_states.delete_one(
-            {
-                "state": test_state
-            }
-        )
-
-        result["database_write"] = True
-
-        result["message"] = (
-            "MongoDB read/write working"
-        )
-
-        return JSONResponse(
-            result
-        )
-
-    except Exception as e:
-
-        result["database_write"] = False
-
-        result["error_type"] = (
-            type(e).__name__
-        )
-
-        result["error"] = str(e)
-
-        return JSONResponse(
-            result,
-            status_code=500
-        )
+    return JSONResponse(
+        result
+    )
 
 
 # =========================================================
@@ -1052,20 +1371,11 @@ def gateway(
             "Gateway database is unavailable."
         )
 
-    # -----------------------------------------------------
-    # TOKEN
-    # -----------------------------------------------------
-
     token_record = get_token_record(
         token
     )
 
     if not token_record:
-
-        logger.warning(
-            "Token not found in bot namespaces: %s",
-            token
-        )
 
         return error_page(
             "Invalid Link",
@@ -1073,37 +1383,7 @@ def gateway(
         )
 
     # -----------------------------------------------------
-    # BOT ID
-    # -----------------------------------------------------
-
-    bot_id = (
-        token_record.get(
-            "_gateway_bot_id"
-        )
-        or token_record.get(
-            "bot_id"
-        )
-        or "bot1"
-    )
-
-    bot_username = get_bot_username(
-        bot_id
-    )
-
-    if not bot_username:
-
-        logger.error(
-            "Bot username missing for %s",
-            bot_id
-        )
-
-        return error_page(
-            "Configuration Error",
-            f"Bot username for {bot_id} is not configured."
-        )
-
-    # -----------------------------------------------------
-    # EXPIRY
+    # TOKEN EXPIRY
     # -----------------------------------------------------
 
     now = datetime.now(
@@ -1128,20 +1408,32 @@ def gateway(
 
             return error_page(
                 "Link Expired",
-                "This link has expired."
+                "This file link has expired."
             )
 
     # -----------------------------------------------------
-    # ALREADY USED
+    # BOT
     # -----------------------------------------------------
 
-    if token_entry_used(
-        token
-    ):
+    bot_id = (
+        token_record.get(
+            "_gateway_bot_id"
+        )
+        or token_record.get(
+            "bot_id"
+        )
+        or "bot1"
+    )
+
+    bot_username = get_bot_username(
+        bot_id
+    )
+
+    if not bot_username:
 
         return error_page(
-            "Link Already Used",
-            "This gateway link has already been opened."
+            "Configuration Error",
+            f"Bot username for {bot_id} is not configured."
         )
 
     # -----------------------------------------------------
@@ -1156,8 +1448,8 @@ def gateway(
 
     if not browser_id:
 
-        browser_id = (
-            secrets.token_urlsafe(32)
+        browser_id = secrets.token_urlsafe(
+            32
         )
 
         set_browser_cookie = True
@@ -1170,9 +1462,13 @@ def gateway(
     # SESSION
     # -----------------------------------------------------
 
-    state = secrets.token_urlsafe(32)
+    state = secrets.token_urlsafe(
+        32
+    )
 
-    access_id = secrets.token_urlsafe(32)
+    access_id = secrets.token_urlsafe(
+        24
+    )
 
     expires_at = (
         now
@@ -1183,35 +1479,38 @@ def gateway(
 
     session = {
 
-        "state": state,
+        "state":
+            state,
 
-        "token": token,
+        "access_id":
+            access_id,
 
-        "bot_id": bot_id,
+        "token":
+            token,
 
-        "bot_username": bot_username,
+        "bot_id":
+            bot_id,
 
-        "access_id": access_id,
+        "bot_username":
+            bot_username,
 
-        "expires_at": expires_at,
+        "browser_hash":
+            browser_hash,
 
-        "used": False,
+        "created_at":
+            now,
 
-        "entry_used": True,
+        "expires_at":
+            expires_at,
 
-        "verified": False,
+        "verified":
+            False,
 
-        "verified_at": None,
+        "used":
+            False,
 
-        "verify_expires_at": None,
-
-        "browser_hash": browser_hash,
-
-        "created_at": now,
-
-        "vplink_url": None,
-
-        "verify_id": None,
+        "entry_used":
+            True,
 
     }
 
@@ -1224,17 +1523,17 @@ def gateway(
     except Exception as e:
 
         logger.error(
-            "Session creation failed: %s",
+            "Unable to save gateway session: %s",
             e
         )
 
         return error_page(
-            "Unable to Create Session",
-            "Unable to create a secure gateway session. Please try again."
+            "Gateway Error",
+            "Unable to create gateway session."
         )
 
     # -----------------------------------------------------
-    # VPLINK
+    # COMPLETE URL
     # -----------------------------------------------------
 
     complete_url = (
@@ -1246,11 +1545,15 @@ def gateway(
         )
     )
 
-    vplink_url = create_vplink(
+    # -----------------------------------------------------
+    # SHORTENER
+    # -----------------------------------------------------
+
+    shortener_url = create_shortener_link(
         complete_url
     )
 
-    if not vplink_url:
+    if not shortener_url:
 
         delete_session(
             state
@@ -1264,12 +1567,17 @@ def gateway(
     update_session(
         state,
         {
-            "vplink_url": vplink_url
+            "shortener_url":
+                shortener_url,
+
+            # Legacy compatibility
+            "vplink_url":
+                shortener_url,
         }
     )
 
     # -----------------------------------------------------
-    # REDIRECT TO ACCESS
+    # ACCESS
     # -----------------------------------------------------
 
     response = RedirectResponse(
@@ -1319,7 +1627,8 @@ def access_page(
 
     session = db.gateway_states.find_one(
         {
-            "access_id": access_id
+            "access_id":
+                access_id
         },
         {
             "_id": 0
@@ -1382,11 +1691,16 @@ def access_page(
             "This session belongs to another browser."
         )
 
-    vplink_url = session.get(
-        "vplink_url"
+    shortener_url = (
+        session.get(
+            "shortener_url"
+        )
+        or session.get(
+            "vplink_url"
+        )
     )
 
-    if not vplink_url:
+    if not shortener_url:
 
         return error_page(
             "Gateway Error",
@@ -1394,78 +1708,78 @@ def access_page(
         )
 
     escaped_url = html.escape(
-        vplink_url,
+        shortener_url,
         quote=True
     )
 
     return HTMLResponse(
         f"""
-        <!DOCTYPE html>
+<!DOCTYPE html>
 
-        <html>
+<html>
 
-        <head>
+<head>
 
-            <meta charset="UTF-8">
+<meta charset="UTF-8">
 
-            <meta
-                name="viewport"
-                content="width=device-width, initial-scale=1.0"
-            >
+<meta
+    name="viewport"
+    content="width=device-width, initial-scale=1.0"
+>
 
-            <meta
-                http-equiv="refresh"
-                content="0;url={escaped_url}"
-            >
+<meta
+    http-equiv="refresh"
+    content="0;url={escaped_url}"
+>
 
-            <title>
-                Lozo Gateway
-            </title>
+<title>
+Lozo Gateway
+</title>
 
-            <style>
+<style>
 
-                body {{
-                    margin: 0;
-                    min-height: 100vh;
-                    display: flex;
-                    align-items: center;
-                    justify-content: center;
-                    background: #0f0f0f;
-                    color: white;
-                    font-family: Arial, sans-serif;
-                }}
+body {{
+    margin: 0;
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: #0f0f0f;
+    color: white;
+    font-family: Arial, sans-serif;
+}}
 
-                .box {{
-                    text-align: center;
-                    padding: 30px;
-                }}
+.box {{
+    text-align: center;
+    padding: 30px;
+}}
 
-                p {{
-                    color: #aaa;
-                }}
+p {{
+    color: #aaa;
+}}
 
-            </style>
+</style>
 
-        </head>
+</head>
 
-        <body>
+<body>
 
-            <div class="box">
+<div class="box">
 
-                <h2>
-                    Redirecting...
-                </h2>
+<h2>
+Redirecting...
+</h2>
 
-                <p>
-                    Please wait...
-                </p>
+<p>
+Please wait...
+</p>
 
-            </div>
+</div>
 
-        </body>
+</body>
 
-        </html>
-        """
+</html>
+"""
     )
 
 
@@ -1581,7 +1895,7 @@ def complete(
         )
 
     # -----------------------------------------------------
-    # CREATE VERIFY CHALLENGE
+    # CREATE VERIFICATION
     # -----------------------------------------------------
 
     verify_id = secrets.token_urlsafe(
@@ -1606,7 +1920,8 @@ def complete(
     update_session(
         state,
         {
-            "verify_id": verify_id,
+            "verify_id":
+                verify_id,
 
             "challenge_hash":
                 challenge_hash,
@@ -1628,105 +1943,105 @@ def complete(
 
     return HTMLResponse(
         f"""
-        <!DOCTYPE html>
+<!DOCTYPE html>
 
-        <html>
+<html>
 
-        <head>
+<head>
 
-            <meta charset="UTF-8">
+<meta charset="UTF-8">
 
-            <meta
-                name="viewport"
-                content="width=device-width, initial-scale=1.0"
-            >
+<meta
+    name="viewport"
+    content="width=device-width, initial-scale=1.0"
+>
 
-            <title>
-                Verification
-            </title>
+<title>
+Verification
+</title>
 
-            <style>
+<style>
 
-                body {{
-                    margin: 0;
-                    min-height: 100vh;
-                    display: flex;
-                    align-items: center;
-                    justify-content: center;
-                    background: #0f0f0f;
-                    color: white;
-                    font-family: Arial, sans-serif;
-                }}
+body {{
+    margin: 0;
+    min-height: 100vh;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    background: #0f0f0f;
+    color: white;
+    font-family: Arial, sans-serif;
+}}
 
-                .box {{
-                    width: 90%;
-                    max-width: 430px;
-                    box-sizing: border-box;
-                    padding: 30px;
-                    text-align: center;
-                    border-radius: 18px;
-                    background: #191919;
-                }}
+.box {{
+    width: 90%;
+    max-width: 430px;
+    box-sizing: border-box;
+    padding: 30px;
+    text-align: center;
+    border-radius: 18px;
+    background: #191919;
+}}
 
-                h1 {{
-                    margin-bottom: 12px;
-                }}
+h1 {{
+    margin-bottom: 12px;
+}}
 
-                p {{
-                    color: #aaa;
-                    line-height: 1.6;
-                }}
+p {{
+    color: #aaa;
+    line-height: 1.6;
+}}
 
-                .btn {{
-                    display: inline-block;
-                    margin-top: 20px;
-                    padding: 14px 25px;
-                    border-radius: 10px;
-                    background: #ffffff;
-                    color: #000000;
-                    text-decoration: none;
-                    font-weight: bold;
-                }}
+.btn {{
+    display: inline-block;
+    margin-top: 20px;
+    padding: 14px 25px;
+    border-radius: 10px;
+    background: #ffffff;
+    color: #000000;
+    text-decoration: none;
+    font-weight: bold;
+}}
 
-                .brand {{
-                    margin-top: 25px;
-                    color: #777;
-                    font-size: 13px;
-                }}
+.brand {{
+    margin-top: 25px;
+    color: #777;
+    font-size: 13px;
+}}
 
-            </style>
+</style>
 
-        </head>
+</head>
 
-        <body>
+<body>
 
-            <div class="box">
+<div class="box">
 
-                <h1>
-                    Verification Required
-                </h1>
+<h1>
+Verification Required
+</h1>
 
-                <p>
-                    Complete the verification to continue.
-                </p>
+<p>
+Complete the verification to continue.
+</p>
 
-                <a
-                    class="btn"
-                    href="{escaped_verify_url}"
-                >
-                    Verify
-                </a>
+<a
+    class="btn"
+    href="{escaped_verify_url}"
+>
+Verify
+</a>
 
-                <div class="brand">
-                    Lozo Gateway
-                </div>
+<div class="brand">
+Lozo Gateway
+</div>
 
-            </div>
+</div>
 
-        </body>
+</body>
 
-        </html>
-        """
+</html>
+"""
     )
 
 
@@ -1843,8 +2158,11 @@ def verify(
     update_session(
         session["state"],
         {
-            "verified": True,
-            "verified_at": now,
+            "verified":
+                True,
+
+            "verified_at":
+                now,
         }
     )
 
@@ -2000,7 +2318,7 @@ def deliver(
             )
 
     # -----------------------------------------------------
-    # ALREADY DELIVERED
+    # ALREADY USED
     # -----------------------------------------------------
 
     if session.get(
@@ -2064,7 +2382,7 @@ def deliver(
             )
 
     # -----------------------------------------------------
-    # DETERMINE CORRECT BOT
+    # BOT
     # -----------------------------------------------------
 
     bot_id = (
@@ -2097,7 +2415,7 @@ def deliver(
         )
 
     # -----------------------------------------------------
-    # MARK SESSION USED
+    # ATOMIC USE
     # -----------------------------------------------------
 
     result = db.gateway_states.update_one(
@@ -2121,7 +2439,7 @@ def deliver(
         )
 
     # -----------------------------------------------------
-    # TELEGRAM
+    # TELEGRAM DELIVERY
     # -----------------------------------------------------
 
     telegram_url = (
@@ -2156,6 +2474,10 @@ def deliver(
         "lozo_vplink"
     )
 
+    response.delete_cookie(
+        "lozo_shortener"
+    )
+
     return response
 
 
@@ -2173,7 +2495,8 @@ def debug_session(
         return JSONResponse(
             {
                 "ok": False,
-                "error": "state is required"
+                "error":
+                    "state is required"
             },
             status_code=400
         )
@@ -2187,7 +2510,8 @@ def debug_session(
         return JSONResponse(
             {
                 "ok": False,
-                "error": "session not found"
+                "error":
+                    "session not found"
             },
             status_code=404
         )
@@ -2208,6 +2532,11 @@ def debug_session(
 
     safe.pop(
         "vplink_url",
+        None
+    )
+
+    safe.pop(
+        "shortener_url",
         None
     )
 
