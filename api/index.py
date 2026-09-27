@@ -517,6 +517,18 @@ Lozo Gateway
 
 
 # =========================================================
+# ONE-TIME GATEWAY SESSION MESSAGE
+# =========================================================
+
+def already_used_page():
+
+    return error_page(
+        "This Link Is Already Used",
+        "This Link Is Already Used. Please Generate Another From The Channel"
+    )
+
+
+# =========================================================
 # DATABASE HELPERS
 # =========================================================
 
@@ -1509,9 +1521,6 @@ def gateway(
         "used":
             False,
 
-        "entry_used":
-            True,
-
     }
 
     try:
@@ -1641,6 +1650,22 @@ def access_page(
             "Invalid Session",
             "This gateway session is invalid."
         )
+
+    # -----------------------------------------------------
+    # ONE-TIME GATEWAY SESSION
+    #
+    # IMPORTANT:
+    # This is checked BEFORE browser validation because
+    # cookies are deleted after successful delivery.
+    # Therefore reopening the same used gateway URL will
+    # always show the one-time-used message.
+    # -----------------------------------------------------
+
+    if session.get(
+        "used"
+    ):
+
+        return already_used_page()
 
     now = datetime.now(
         timezone.utc
@@ -1813,6 +1838,16 @@ def complete(
             "This gateway session is invalid."
         )
 
+    # -----------------------------------------------------
+    # ONE-TIME GATEWAY SESSION
+    # -----------------------------------------------------
+
+    if session.get(
+        "used"
+    ):
+
+        return already_used_page()
+
     now = datetime.now(
         timezone.utc
     )
@@ -1837,18 +1872,6 @@ def complete(
                 "Session Expired",
                 "This gateway session has expired."
             )
-
-    if session.get(
-        "used"
-    ):
-
-        return RedirectResponse(
-            url=(
-                f"/api/deliver?"
-                f"state={state}"
-            ),
-            status_code=302
-        )
 
     # -----------------------------------------------------
     # BROWSER
@@ -2067,6 +2090,16 @@ def verify(
             "This verification session is invalid."
         )
 
+    # -----------------------------------------------------
+    # ONE-TIME GATEWAY SESSION
+    # -----------------------------------------------------
+
+    if session.get(
+        "used"
+    ):
+
+        return already_used_page()
+
     now = datetime.now(
         timezone.utc
     )
@@ -2216,6 +2249,19 @@ def deliver(
             "This gateway session is invalid."
         )
 
+    # -----------------------------------------------------
+    # ONE-TIME GATEWAY SESSION
+    #
+    # Check BEFORE browser/cookie validation.
+    # Cookies are deleted after successful delivery.
+    # -----------------------------------------------------
+
+    if session.get(
+        "used"
+    ):
+
+        return already_used_page()
+
     now = datetime.now(
         timezone.utc
     )
@@ -2318,19 +2364,6 @@ def deliver(
             )
 
     # -----------------------------------------------------
-    # ALREADY USED
-    # -----------------------------------------------------
-
-    if session.get(
-        "used"
-    ):
-
-        return error_page(
-            "Link Already Used",
-            "This gateway session has already been used."
-        )
-
-    # -----------------------------------------------------
     # ORIGINAL TOKEN
     # -----------------------------------------------------
 
@@ -2416,6 +2449,9 @@ def deliver(
 
     # -----------------------------------------------------
     # ATOMIC USE
+    #
+    # Only THIS gateway session is consumed.
+    # Original Telegram token remains reusable.
     # -----------------------------------------------------
 
     result = db.gateway_states.update_one(
@@ -2433,10 +2469,7 @@ def deliver(
 
     if result.modified_count != 1:
 
-        return error_page(
-            "Link Already Used",
-            "This gateway session has already been used."
-        )
+        return already_used_page()
 
     # -----------------------------------------------------
     # TELEGRAM DELIVERY
