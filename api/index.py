@@ -517,7 +517,7 @@ Lozo Gateway
 
 
 # =========================================================
-# ONE-TIME GATEWAY SESSION MESSAGE
+# ONE-TIME GATEWAY MESSAGE
 # =========================================================
 
 def already_used_page():
@@ -1471,7 +1471,12 @@ def gateway(
     ).hexdigest()
 
     # -----------------------------------------------------
-    # SESSION
+    # NEW GATEWAY SESSION
+    #
+    # Every click on the original Telegram token creates
+    # a completely new gateway session.
+    #
+    # The original token itself is NOT consumed.
     # -----------------------------------------------------
 
     state = secrets.token_urlsafe(
@@ -1515,12 +1520,16 @@ def gateway(
         "expires_at":
             expires_at,
 
-        "verified":
+        # Gateway URL has not been opened yet.
+        "opened":
             False,
 
+        # Telegram delivery has not happened yet.
         "used":
             False,
 
+        "verified":
+            False,
     }
 
     try:
@@ -1651,25 +1660,13 @@ def access_page(
             "This gateway session is invalid."
         )
 
-    # -----------------------------------------------------
-    # ONE-TIME GATEWAY SESSION
-    #
-    # IMPORTANT:
-    # This is checked BEFORE browser validation because
-    # cookies are deleted after successful delivery.
-    # Therefore reopening the same used gateway URL will
-    # always show the one-time-used message.
-    # -----------------------------------------------------
-
-    if session.get(
-        "used"
-    ):
-
-        return already_used_page()
-
     now = datetime.now(
         timezone.utc
     )
+
+    # -----------------------------------------------------
+    # SESSION EXPIRY
+    # -----------------------------------------------------
 
     expires_at = session.get(
         "expires_at"
@@ -1691,6 +1688,22 @@ def access_page(
                 "Session Expired",
                 "This gateway session has expired."
             )
+
+    # -----------------------------------------------------
+    # ALREADY OPENED
+    #
+    # The gateway URL itself is one-time.
+    # -----------------------------------------------------
+
+    if session.get(
+        "opened"
+    ):
+
+        return already_used_page()
+
+    # -----------------------------------------------------
+    # BROWSER
+    # -----------------------------------------------------
 
     browser_id = request.cookies.get(
         "lozo_browser_id"
@@ -1715,6 +1728,37 @@ def access_page(
             "Browser Mismatch",
             "This session belongs to another browser."
         )
+
+    # -----------------------------------------------------
+    # ATOMIC ONE-TIME OPEN
+    #
+    # This is the important protection.
+    #
+    # Two simultaneous requests cannot both open the same
+    # gateway URL. Only the first request can change
+    # opened=False -> opened=True.
+    # -----------------------------------------------------
+
+    result = db.gateway_states.update_one(
+        {
+            "access_id": access_id,
+            "opened": False,
+        },
+        {
+            "$set": {
+                "opened": True,
+                "opened_at": now,
+            }
+        }
+    )
+
+    if result.modified_count != 1:
+
+        return already_used_page()
+
+    # -----------------------------------------------------
+    # SHORTENER
+    # -----------------------------------------------------
 
     shortener_url = (
         session.get(
@@ -1839,7 +1883,20 @@ def complete(
         )
 
     # -----------------------------------------------------
-    # ONE-TIME GATEWAY SESSION
+    # GATEWAY URL ALREADY OPENED
+    # -----------------------------------------------------
+
+    if session.get(
+        "opened"
+    ) is not True:
+
+        return error_page(
+            "Invalid Session",
+            "This gateway session has not been opened correctly."
+        )
+
+    # -----------------------------------------------------
+    # DELIVERY ALREADY COMPLETED
     # -----------------------------------------------------
 
     if session.get(
@@ -2091,7 +2148,7 @@ def verify(
         )
 
     # -----------------------------------------------------
-    # ONE-TIME GATEWAY SESSION
+    # GATEWAY DELIVERY ALREADY USED
     # -----------------------------------------------------
 
     if session.get(
@@ -2250,10 +2307,22 @@ def deliver(
         )
 
     # -----------------------------------------------------
-    # ONE-TIME GATEWAY SESSION
+    # GATEWAY URL MUST HAVE BEEN OPENED
+    # -----------------------------------------------------
+
+    if session.get(
+        "opened"
+    ) is not True:
+
+        return error_page(
+            "Invalid Session",
+            "This gateway session has not been opened correctly."
+        )
+
+    # -----------------------------------------------------
+    # ALREADY USED
     #
-    # Check BEFORE browser/cookie validation.
-    # Cookies are deleted after successful delivery.
+    # This is delivery-level one-time protection.
     # -----------------------------------------------------
 
     if session.get(
@@ -2448,10 +2517,10 @@ def deliver(
         )
 
     # -----------------------------------------------------
-    # ATOMIC USE
+    # ATOMIC DELIVERY USE
     #
-    # Only THIS gateway session is consumed.
-    # Original Telegram token remains reusable.
+    # Only this gateway session is consumed.
+    # The original Telegram token remains reusable.
     # -----------------------------------------------------
 
     result = db.gateway_states.update_one(
