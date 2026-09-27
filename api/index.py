@@ -39,13 +39,6 @@ MONGO_DB = os.getenv(
 
 # =========================================================
 # UNIVERSAL SHORTENER
-#
-# New variables:
-#
-# SHORTENER_API_URL
-# SHORTENER_API_KEY
-#
-# Old VPLink variables are kept as fallback.
 # =========================================================
 
 SHORTENER_API_URL = os.getenv(
@@ -66,6 +59,7 @@ if not SHORTENER_API_URL:
         "https://vplink.in/api"
     ).strip().rstrip("/")
 
+
 if not SHORTENER_API_KEY:
     SHORTENER_API_KEY = os.getenv(
         "VPLINK_API_KEY",
@@ -78,12 +72,14 @@ GATEWAY_DOMAIN = os.getenv(
     "https://lozo-94.vercel.app"
 ).strip().rstrip("/")
 
+
 SESSION_MINUTES = int(
     os.getenv(
         "SESSION_MINUTES",
         "30"
     )
 )
+
 
 VERIFY_MINUTES = int(
     os.getenv(
@@ -245,9 +241,9 @@ def initialize_database():
             )
 
         # -------------------------------------------------
-        # TOKEN INDEX
+        # GATEWAY STATE TOKEN INDEX
         #
-        # Multiple gateway sessions may use same token.
+        # Multiple sessions can use same original token.
         # -------------------------------------------------
 
         indexes = {
@@ -299,6 +295,33 @@ def initialize_database():
                 "challenge_hash_1"
             )
 
+        # -------------------------------------------------
+        # ONE-TIME GATEWAY ENTRIES
+        #
+        # shortener.py creates one entry for every
+        # generated gateway link.
+        #
+        # The original Telegram token remains reusable.
+        # -------------------------------------------------
+
+        db.gateway_entries.create_index(
+            [("entry_id", ASCENDING)],
+            name="entry_id_1",
+            unique=True
+        )
+
+        db.gateway_entries.create_index(
+            [("token", ASCENDING)],
+            name="gateway_entry_token_1",
+            unique=False
+        )
+
+        db.gateway_entries.create_index(
+            [("created_at", ASCENDING)],
+            name="gateway_entry_created_at_1",
+            unique=False
+        )
+
         logger.info(
             "MongoDB connected successfully: %s",
             MONGO_DB
@@ -339,7 +362,10 @@ def get_token_record(token):
     if not db_ready():
         return None
 
+    # -----------------------------------------------------
     # Bot 1
+    # -----------------------------------------------------
+
     try:
 
         record = db.bot_bot1_tokens.find_one(
@@ -360,7 +386,10 @@ def get_token_record(token):
             e
         )
 
+    # -----------------------------------------------------
     # Bot 2
+    # -----------------------------------------------------
+
     try:
 
         record = db.bot_bot2_tokens.find_one(
@@ -381,7 +410,10 @@ def get_token_record(token):
             e
         )
 
+    # -----------------------------------------------------
     # Legacy
+    # -----------------------------------------------------
+
     try:
 
         record = db.tokens.find_one(
@@ -415,7 +447,6 @@ def get_bot_username(bot_id):
     ).strip().lower()
 
     if bot_id == "bot2":
-
         return BOT2_USERNAME
 
     return BOT_USERNAME
@@ -434,16 +465,12 @@ def error_page(
         f"""
 <!DOCTYPE html>
 <html>
-
 <head>
-
 <meta charset="UTF-8">
-
 <meta
-    name="viewport"
-    content="width=device-width, initial-scale=1.0"
+name="viewport"
+content="width=device-width, initial-scale=1.0"
 >
-
 <title>{html.escape(title)}</title>
 
 <style>
@@ -487,7 +514,6 @@ p {{
 }}
 
 </style>
-
 </head>
 
 <body>
@@ -509,7 +535,6 @@ Lozo Gateway
 </div>
 
 </body>
-
 </html>
 """,
         status_code=400
@@ -642,7 +667,6 @@ def shortener_provider():
     for name in PROVIDER_NAMES:
 
         if name in value:
-
             return name
 
     return "generic"
@@ -672,7 +696,6 @@ def extract_short_url(data):
         dict
     ):
 
-        # Direct keys
         for key in SHORT_URL_KEYS:
 
             value = data.get(
@@ -694,7 +717,6 @@ def extract_short_url(data):
 
                     return value
 
-        # Common nested objects
         for key in (
             "result",
             "data",
@@ -712,7 +734,6 @@ def extract_short_url(data):
             )
 
             if result:
-
                 return result
 
     if isinstance(
@@ -727,7 +748,6 @@ def extract_short_url(data):
             )
 
             if result:
-
                 return result
 
     return None
@@ -756,7 +776,6 @@ def parse_shortener_response(
         )
 
         if result:
-
             return result
 
     except Exception:
@@ -797,7 +816,6 @@ def unique_endpoints():
         f"{base}/api/v1/shorten",
 
         f"{base}/api/v1/shorten/",
-
     ]
 
     result = []
@@ -805,7 +823,6 @@ def unique_endpoints():
     for value in values:
 
         if value and value not in result:
-
             result.append(value)
 
     return result
@@ -900,9 +917,7 @@ def create_rebrandly(
 
                 return (
                     "https://"
-                    + str(short).lstrip(
-                        "/"
-                    )
+                    + str(short).lstrip("/")
                 )
 
     except Exception as e:
@@ -1018,7 +1033,6 @@ def create_generic_shortener(
             "key": SHORTENER_API_KEY,
             "link": destination,
         },
-
     ]
 
     for endpoint in endpoints:
@@ -1043,7 +1057,6 @@ def create_generic_shortener(
                 )
 
                 if result:
-
                     return result
 
             except Exception as e:
@@ -1098,7 +1111,6 @@ def create_generic_shortener(
             "destination": destination,
             "api": SHORTENER_API_KEY,
         },
-
     ]
 
     for endpoint in endpoints:
@@ -1123,7 +1135,6 @@ def create_generic_shortener(
                 )
 
                 if result:
-
                     return result
 
             except Exception as e:
@@ -1154,7 +1165,6 @@ def create_generic_shortener(
                 )
 
                 if result:
-
                     return result
 
             except Exception as e:
@@ -1238,9 +1248,6 @@ def create_shortener_link(
 
     # -----------------------------------------------------
     # GENERIC
-    #
-    # Works with common URL/key based APIs including
-    # VPLink-style APIs.
     # -----------------------------------------------------
 
     result = create_generic_shortener(
@@ -1248,7 +1255,6 @@ def create_shortener_link(
     )
 
     if result:
-
         return result
 
     logger.error(
@@ -1275,11 +1281,13 @@ def home():
 <meta charset="UTF-8">
 
 <meta
-    name="viewport"
-    content="width=device-width, initial-scale=1.0"
+name="viewport"
+content="width=device-width, initial-scale=1.0"
 >
 
-<title>Lozo Gateway</title>
+<title>
+Lozo Gateway
+</title>
 
 <style>
 
@@ -1339,17 +1347,27 @@ def health():
 
     result = {
         "ok": True,
-        "service": "lozo-gateway",
-        "database": db_ready(),
-        "shortener": bool(
-            SHORTENER_API_URL
-            and SHORTENER_API_KEY
-        ),
+
+        "service":
+            "lozo-gateway",
+
+        "database":
+            db_ready(),
+
+        "shortener":
+            bool(
+                SHORTENER_API_URL
+                and SHORTENER_API_KEY
+            ),
+
         "token_namespaces": [
             "bot_bot1_tokens",
             "bot_bot2_tokens",
             "tokens",
         ],
+
+        "gateway_entries":
+            db_ready(),
     }
 
     return JSONResponse(
@@ -1364,16 +1382,16 @@ def health():
 @app.get("/api/gateway")
 def gateway(
     request: Request,
-    token: str = Query("")
+    entry: str = Query("")
 ):
 
-    token = token.strip()
+    entry = entry.strip()
 
-    if not token:
+    if not entry:
 
         return error_page(
             "Invalid Link",
-            "No token was provided."
+            "No gateway entry was provided."
         )
 
     if not db_ready():
@@ -1383,8 +1401,64 @@ def gateway(
             "Gateway database is unavailable."
         )
 
+    # -----------------------------------------------------
+    # FIND UNIQUE GATEWAY ENTRY
+    # -----------------------------------------------------
+
+    gateway_entry = db.gateway_entries.find_one(
+        {
+            "entry_id": entry
+        },
+        {
+            "_id": 0
+        }
+    )
+
+    if not gateway_entry:
+
+        return error_page(
+            "Invalid Link",
+            "This gateway link is invalid or no longer available."
+        )
+
+    # -----------------------------------------------------
+    # EXACT GENERATED URL ALREADY USED
+    # -----------------------------------------------------
+
+    if gateway_entry.get(
+        "used"
+    ) is True:
+
+        return already_used_page()
+
+    # -----------------------------------------------------
+    # ORIGINAL TOKEN
+    # -----------------------------------------------------
+
+    original_token = str(
+        gateway_entry.get(
+            "token"
+        )
+        or ""
+    ).strip()
+
+    if not original_token:
+
+        return error_page(
+            "Invalid Link",
+            "Original token is missing."
+        )
+
+    # -----------------------------------------------------
+    # ORIGINAL TOKEN VALIDATION
+    #
+    # The original token is ONLY checked.
+    #
+    # It is never consumed here.
+    # -----------------------------------------------------
+
     token_record = get_token_record(
-        token
+        original_token
     )
 
     if not token_record:
@@ -1437,8 +1511,13 @@ def gateway(
         or "bot1"
     )
 
-    bot_username = get_bot_username(
-        bot_id
+    bot_username = (
+        gateway_entry.get(
+            "bot_username"
+        )
+        or get_bot_username(
+            bot_id
+        )
     )
 
     if not bot_username:
@@ -1471,12 +1550,7 @@ def gateway(
     ).hexdigest()
 
     # -----------------------------------------------------
-    # NEW GATEWAY SESSION
-    #
-    # Every click on the original Telegram token creates
-    # a completely new gateway session.
-    #
-    # The original token itself is NOT consumed.
+    # NEW SESSION
     # -----------------------------------------------------
 
     state = secrets.token_urlsafe(
@@ -1502,8 +1576,11 @@ def gateway(
         "access_id":
             access_id,
 
+        "entry_id":
+            entry,
+
         "token":
-            token,
+            original_token,
 
         "bot_id":
             bot_id,
@@ -1520,17 +1597,19 @@ def gateway(
         "expires_at":
             expires_at,
 
-        # Gateway URL has not been opened yet.
         "opened":
             False,
 
-        # Telegram delivery has not happened yet.
         "used":
             False,
 
         "verified":
             False,
     }
+
+    # -----------------------------------------------------
+    # SAVE SESSION
+    # -----------------------------------------------------
 
     try:
 
@@ -1558,13 +1637,14 @@ def gateway(
         f"{GATEWAY_DOMAIN}/api/complete?"
         + urlencode(
             {
-                "state": state
+                "state":
+                    state
             }
         )
     )
 
     # -----------------------------------------------------
-    # SHORTENER
+    # UNIVERSAL SHORTENER
     # -----------------------------------------------------
 
     shortener_url = create_shortener_link(
@@ -1588,11 +1668,52 @@ def gateway(
             "shortener_url":
                 shortener_url,
 
-            # Legacy compatibility
             "vplink_url":
                 shortener_url,
         }
     )
+
+    # -----------------------------------------------------
+    # ATOMICALLY CONSUME ONLY THIS ENTRY
+    #
+    # The original Telegram token is NOT changed.
+    #
+    # Only:
+    #
+    # gateway_entries.used = True
+    #
+    # Therefore:
+    #
+    # Same entry -> one time
+    # New entry from same token -> works normally
+    # -----------------------------------------------------
+
+    claim_result = db.gateway_entries.update_one(
+        {
+            "entry_id":
+                entry,
+
+            "used":
+                False,
+        },
+        {
+            "$set": {
+                "used":
+                    True,
+
+                "used_at":
+                    now,
+            }
+        }
+    )
+
+    if claim_result.modified_count != 1:
+
+        delete_session(
+            state
+        )
+
+        return already_used_page()
 
     # -----------------------------------------------------
     # ACCESS
@@ -1691,8 +1812,6 @@ def access_page(
 
     # -----------------------------------------------------
     # ALREADY OPENED
-    #
-    # The gateway URL itself is one-time.
     # -----------------------------------------------------
 
     if session.get(
@@ -1731,23 +1850,23 @@ def access_page(
 
     # -----------------------------------------------------
     # ATOMIC ONE-TIME OPEN
-    #
-    # This is the important protection.
-    #
-    # Two simultaneous requests cannot both open the same
-    # gateway URL. Only the first request can change
-    # opened=False -> opened=True.
     # -----------------------------------------------------
 
     result = db.gateway_states.update_one(
         {
-            "access_id": access_id,
-            "opened": False,
+            "access_id":
+                access_id,
+
+            "opened":
+                False,
         },
         {
             "$set": {
-                "opened": True,
-                "opened_at": now,
+                "opened":
+                    True,
+
+                "opened_at":
+                    now,
             }
         }
     )
@@ -1784,7 +1903,6 @@ def access_page(
     return HTMLResponse(
         f"""
 <!DOCTYPE html>
-
 <html>
 
 <head>
@@ -1792,13 +1910,13 @@ def access_page(
 <meta charset="UTF-8">
 
 <meta
-    name="viewport"
-    content="width=device-width, initial-scale=1.0"
+name="viewport"
+content="width=device-width, initial-scale=1.0"
 >
 
 <meta
-    http-equiv="refresh"
-    content="0;url={escaped_url}"
+http-equiv="refresh"
+content="0;url={escaped_url}"
 >
 
 <title>
@@ -1883,7 +2001,7 @@ def complete(
         )
 
     # -----------------------------------------------------
-    # GATEWAY URL ALREADY OPENED
+    # GATEWAY MUST HAVE BEEN OPENED
     # -----------------------------------------------------
 
     if session.get(
@@ -2024,7 +2142,6 @@ def complete(
     return HTMLResponse(
         f"""
 <!DOCTYPE html>
-
 <html>
 
 <head>
@@ -2032,8 +2149,8 @@ def complete(
 <meta charset="UTF-8">
 
 <meta
-    name="viewport"
-    content="width=device-width, initial-scale=1.0"
+name="viewport"
+content="width=device-width, initial-scale=1.0"
 >
 
 <title>
@@ -2106,8 +2223,8 @@ Complete the verification to continue.
 </p>
 
 <a
-    class="btn"
-    href="{escaped_verify_url}"
+class="btn"
+href="{escaped_verify_url}"
 >
 Verify
 </a>
@@ -2148,7 +2265,7 @@ def verify(
         )
 
     # -----------------------------------------------------
-    # GATEWAY DELIVERY ALREADY USED
+    # DELIVERY ALREADY USED
     # -----------------------------------------------------
 
     if session.get(
@@ -2307,7 +2424,7 @@ def deliver(
         )
 
     # -----------------------------------------------------
-    # GATEWAY URL MUST HAVE BEEN OPENED
+    # GATEWAY MUST HAVE BEEN OPENED
     # -----------------------------------------------------
 
     if session.get(
@@ -2321,8 +2438,6 @@ def deliver(
 
     # -----------------------------------------------------
     # ALREADY USED
-    #
-    # This is delivery-level one-time protection.
     # -----------------------------------------------------
 
     if session.get(
@@ -2520,18 +2635,25 @@ def deliver(
     # ATOMIC DELIVERY USE
     #
     # Only this gateway session is consumed.
-    # The original Telegram token remains reusable.
+    #
+    # Original Telegram token remains reusable.
     # -----------------------------------------------------
 
     result = db.gateway_states.update_one(
         {
-            "state": state,
-            "used": False,
+            "state":
+                state,
+
+            "used":
+                False,
         },
         {
             "$set": {
-                "used": True,
-                "delivered_at": now,
+                "used":
+                    True,
+
+                "delivered_at":
+                    now,
             }
         }
     )
