@@ -9,7 +9,7 @@ from urllib.parse import urlencode
 import requests
 from fastapi import FastAPI, Query, Request
 from fastapi.responses import HTMLResponse, RedirectResponse, JSONResponse
-from pymongo import MongoClient, ASCENDING
+from pymongo import MongoClient, ASCENDING, ReturnDocument
 
 
 # =========================================================
@@ -38,33 +38,29 @@ MONGO_DB = os.getenv(
 
 
 # =========================================================
-# UNIVERSAL SHORTENER
+# TWO SHORTENERS
 # =========================================================
 
-SHORTENER_API_URL = os.getenv(
-    "SHORTENER_API_URL",
+SHORTENER1_API_URL = os.getenv(
+    "SHORTENER1_API_URL",
     ""
 ).strip().rstrip("/")
 
-SHORTENER_API_KEY = os.getenv(
-    "SHORTENER_API_KEY",
+SHORTENER1_API_KEY = os.getenv(
+    "SHORTENER1_API_KEY",
     ""
 ).strip()
 
 
-# Legacy VPLink fallback
-if not SHORTENER_API_URL:
-    SHORTENER_API_URL = os.getenv(
-        "VPLINK_API_URL",
-        "https://vplink.in/api"
-    ).strip().rstrip("/")
+SHORTENER2_API_URL = os.getenv(
+    "SHORTENER2_API_URL",
+    ""
+).strip().rstrip("/")
 
-
-if not SHORTENER_API_KEY:
-    SHORTENER_API_KEY = os.getenv(
-        "VPLINK_API_KEY",
-        ""
-    ).strip()
+SHORTENER2_API_KEY = os.getenv(
+    "SHORTENER2_API_KEY",
+    ""
+).strip()
 
 
 GATEWAY_DOMAIN = os.getenv(
@@ -79,7 +75,6 @@ SESSION_MINUTES = int(
         "30"
     )
 )
-
 
 VERIFY_MINUTES = int(
     os.getenv(
@@ -148,15 +143,15 @@ def initialize_database():
         # TOKEN COLLECTIONS
         # -------------------------------------------------
 
-        token_collections = [
+        for collection_name in (
             "bot_bot1_tokens",
             "bot_bot2_tokens",
             "tokens",
-        ]
+        ):
 
-        for collection_name in token_collections:
-
-            collection = db[collection_name]
+            collection = db[
+                collection_name
+            ]
 
             try:
 
@@ -203,7 +198,7 @@ def initialize_database():
                 )
 
         # -------------------------------------------------
-        # GATEWAY STATE INDEX
+        # GATEWAY STATE INDEXES
         # -------------------------------------------------
 
         indexes = {
@@ -211,28 +206,7 @@ def initialize_database():
             for idx in db.gateway_states.list_indexes()
         }
 
-        state_index = indexes.get(
-            "state_1"
-        )
-
-        if state_index:
-
-            if not state_index.get(
-                "unique",
-                False
-            ):
-
-                db.gateway_states.drop_index(
-                    "state_1"
-                )
-
-                db.gateway_states.create_index(
-                    [("state", ASCENDING)],
-                    name="state_1",
-                    unique=True
-                )
-
-        else:
+        if "state_1" not in indexes:
 
             db.gateway_states.create_index(
                 [("state", ASCENDING)],
@@ -240,39 +214,42 @@ def initialize_database():
                 unique=True
             )
 
-        # -------------------------------------------------
-        # GATEWAY STATE TOKEN INDEX
-        #
-        # Multiple sessions can use same original token.
-        # -------------------------------------------------
+        elif not indexes["state_1"].get(
+            "unique",
+            False
+        ):
+
+            db.gateway_states.drop_index(
+                "state_1"
+            )
+
+            db.gateway_states.create_index(
+                [("state", ASCENDING)],
+                name="state_1",
+                unique=True
+            )
 
         indexes = {
             idx["name"]: idx
             for idx in db.gateway_states.list_indexes()
         }
 
-        token_index = indexes.get(
-            "token_1"
-        )
+        if "token_1" not in indexes:
 
-        if token_index:
+            db.gateway_states.create_index(
+                [("token", ASCENDING)],
+                name="token_1",
+                unique=False
+            )
 
-            if token_index.get(
-                "unique",
-                False
-            ):
+        elif indexes["token_1"].get(
+            "unique",
+            False
+        ):
 
-                db.gateway_states.drop_index(
-                    "token_1"
-                )
-
-                db.gateway_states.create_index(
-                    [("token", ASCENDING)],
-                    name="token_1",
-                    unique=False
-                )
-
-        else:
+            db.gateway_states.drop_index(
+                "token_1"
+            )
 
             db.gateway_states.create_index(
                 [("token", ASCENDING)],
@@ -281,27 +258,7 @@ def initialize_database():
             )
 
         # -------------------------------------------------
-        # REMOVE OLD CHALLENGE HASH INDEX
-        # -------------------------------------------------
-
-        indexes = {
-            idx["name"]: idx
-            for idx in db.gateway_states.list_indexes()
-        }
-
-        if "challenge_hash_1" in indexes:
-
-            db.gateway_states.drop_index(
-                "challenge_hash_1"
-            )
-
-        # -------------------------------------------------
-        # ONE-TIME GATEWAY ENTRIES
-        #
-        # shortener.py creates one entry for every
-        # generated gateway link.
-        #
-        # The original Telegram token remains reusable.
+        # GATEWAY ENTRIES
         # -------------------------------------------------
 
         db.gateway_entries.create_index(
@@ -320,6 +277,22 @@ def initialize_database():
             [("created_at", ASCENDING)],
             name="gateway_entry_created_at_1",
             unique=False
+        )
+
+        # -------------------------------------------------
+        # SHORTENER ROTATION
+        # -------------------------------------------------
+
+        db.gateway_settings.update_one(
+            {
+                "_id": "shortener_rotation"
+            },
+            {
+                "$setOnInsert": {
+                    "next": 1
+                }
+            },
+            upsert=True
         )
 
         logger.info(
@@ -354,17 +327,13 @@ def db_ready():
 
 
 # =========================================================
-# BOT / TOKEN HELPERS
+# TOKEN HELPERS
 # =========================================================
 
 def get_token_record(token):
 
     if not db_ready():
         return None
-
-    # -----------------------------------------------------
-    # Bot 1
-    # -----------------------------------------------------
 
     try:
 
@@ -382,13 +351,9 @@ def get_token_record(token):
     except Exception as e:
 
         logger.warning(
-            "Bot 1 token lookup failed: %s",
+            "Bot1 token lookup failed: %s",
             e
         )
-
-    # -----------------------------------------------------
-    # Bot 2
-    # -----------------------------------------------------
 
     try:
 
@@ -406,13 +371,9 @@ def get_token_record(token):
     except Exception as e:
 
         logger.warning(
-            "Bot 2 token lookup failed: %s",
+            "Bot2 token lookup failed: %s",
             e
         )
-
-    # -----------------------------------------------------
-    # Legacy
-    # -----------------------------------------------------
 
     try:
 
@@ -444,7 +405,7 @@ def get_bot_username(bot_id):
 
     bot_id = str(
         bot_id or "bot1"
-    ).strip().lower()
+    ).lower().strip()
 
     if bot_id == "bot2":
         return BOT2_USERNAME
@@ -467,50 +428,49 @@ def error_page(
 <html>
 <head>
 <meta charset="UTF-8">
-<meta
-name="viewport"
-content="width=device-width, initial-scale=1.0"
->
+<meta name="viewport"
+      content="width=device-width, initial-scale=1.0">
+
 <title>{html.escape(title)}</title>
 
 <style>
 
 body {{
-    margin: 0;
-    min-height: 100vh;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    background: #0f0f0f;
-    color: white;
-    font-family: Arial, sans-serif;
+    margin:0;
+    min-height:100vh;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    background:#0f0f0f;
+    color:white;
+    font-family:Arial,sans-serif;
 }}
 
 .box {{
-    width: 90%;
-    max-width: 430px;
-    padding: 30px;
-    box-sizing: border-box;
-    text-align: center;
-    border-radius: 18px;
-    background: #191919;
-    box-shadow: 0 10px 40px rgba(0,0,0,.4);
+    width:90%;
+    max-width:430px;
+    padding:30px;
+    box-sizing:border-box;
+    text-align:center;
+    border-radius:18px;
+    background:#191919;
+    box-shadow:0 10px 40px rgba(0,0,0,.4);
 }}
 
 h1 {{
-    margin-bottom: 15px;
-    font-size: 25px;
+    margin-bottom:15px;
+    font-size:25px;
 }}
 
 p {{
-    color: #bdbdbd;
-    line-height: 1.6;
+    color:#bdbdbd;
+    line-height:1.6;
 }}
 
 .brand {{
-    margin-top: 25px;
-    font-size: 13px;
-    color: #777;
+    margin-top:25px;
+    font-size:13px;
+    color:#777;
 }}
 
 </style>
@@ -541,10 +501,6 @@ Lozo Gateway
     )
 
 
-# =========================================================
-# ONE-TIME GATEWAY MESSAGE
-# =========================================================
-
 def already_used_page():
 
     return error_page(
@@ -554,7 +510,7 @@ def already_used_page():
 
 
 # =========================================================
-# DATABASE HELPERS
+# SESSION HELPERS
 # =========================================================
 
 def get_session(state):
@@ -583,9 +539,6 @@ def get_session_by_verify_id(
 
 def save_session(session):
 
-    if not db_ready():
-        return False
-
     db.gateway_states.insert_one(
         session
     )
@@ -598,9 +551,6 @@ def update_session(
     update
 ):
 
-    if not db_ready():
-        return False
-
     result = db.gateway_states.update_one(
         {"state": state},
         {"$set": update}
@@ -611,9 +561,6 @@ def update_session(
 
 def delete_session(state):
 
-    if not db_ready():
-        return False
-
     db.gateway_states.delete_one(
         {"state": state}
     )
@@ -622,26 +569,8 @@ def delete_session(state):
 
 
 # =========================================================
-# UNIVERSAL SHORTENER
+# SHORTENER RESPONSE HELPERS
 # =========================================================
-
-PROVIDER_NAMES = (
-    "vplink",
-    "vplinks",
-    "arolinks",
-    "shortxlinks",
-    "instantlinks",
-    "rempo",
-    "remso",
-    "babylinks",
-    "linkshortify",
-    "bitly",
-    "rebrandly",
-    "short.io",
-    "shortio",
-    "shrinkme",
-)
-
 
 SHORT_URL_KEYS = (
     "shortenedUrl",
@@ -657,64 +586,34 @@ SHORT_URL_KEYS = (
 )
 
 
-def shortener_provider():
-
-    value = (
-        SHORTENER_API_URL
-        or ""
-    ).lower()
-
-    for name in PROVIDER_NAMES:
-
-        if name in value:
-            return name
-
-    return "generic"
-
-
 def extract_short_url(data):
 
-    if isinstance(
-        data,
-        str
-    ):
+    if isinstance(data, str):
 
         value = data.strip()
 
-        if value.startswith(
-            "http://"
-        ) or value.startswith(
-            "https://"
+        if (
+            value.startswith("http://")
+            or value.startswith("https://")
         ):
-
             return value
 
         return None
 
-    if isinstance(
-        data,
-        dict
-    ):
+    if isinstance(data, dict):
 
         for key in SHORT_URL_KEYS:
 
-            value = data.get(
-                key
-            )
+            value = data.get(key)
 
-            if isinstance(
-                value,
-                str
-            ):
+            if isinstance(value, str):
 
                 value = value.strip()
 
-                if value.startswith(
-                    "http://"
-                ) or value.startswith(
-                    "https://"
+                if (
+                    value.startswith("http://")
+                    or value.startswith("https://")
                 ):
-
                     return value
 
         for key in (
@@ -725,9 +624,7 @@ def extract_short_url(data):
             "resultData",
         ):
 
-            nested = data.get(
-                key
-            )
+            nested = data.get(key)
 
             result = extract_short_url(
                 nested
@@ -736,10 +633,7 @@ def extract_short_url(data):
             if result:
                 return result
 
-    if isinstance(
-        data,
-        list
-    ):
+    if isinstance(data, list):
 
         for item in data:
 
@@ -783,10 +677,9 @@ def parse_shortener_response(
 
     text = response.text.strip()
 
-    if text.startswith(
-        "http://"
-    ) or text.startswith(
-        "https://"
+    if (
+        text.startswith("http://")
+        or text.startswith("https://")
     ):
 
         return text
@@ -794,12 +687,20 @@ def parse_shortener_response(
     return None
 
 
-def unique_endpoints():
+# =========================================================
+# GENERIC SHORTENER
+# =========================================================
+
+def unique_endpoints(
+    base
+):
 
     base = (
-        SHORTENER_API_URL
-        or ""
+        base or ""
     ).rstrip("/")
+
+    if not base:
+        return []
 
     values = [
 
@@ -828,165 +729,18 @@ def unique_endpoints():
     return result
 
 
-def create_bitly(
-    destination
-):
-
-    headers = {
-        "Authorization":
-            f"Bearer {SHORTENER_API_KEY}",
-        "Content-Type":
-            "application/json",
-    }
-
-    payload = {
-        "long_url": destination
-    }
-
-    try:
-
-        response = requests.post(
-            "https://api-ssl.bitly.com/v4/shorten",
-            headers=headers,
-            json=payload,
-            timeout=20
-        )
-
-        if response.ok:
-
-            data = response.json()
-
-            result = (
-                data.get("link")
-                or data.get("url")
-            )
-
-            if result:
-                return result
-
-    except Exception as e:
-
-        logger.warning(
-            "Bitly failed: %s",
-            e
-        )
-
-    return None
-
-
-def create_rebrandly(
-    destination
-):
-
-    headers = {
-        "apikey":
-            SHORTENER_API_KEY,
-        "Content-Type":
-            "application/json",
-    }
-
-    payload = {
-        "destination": destination
-    }
-
-    try:
-
-        response = requests.post(
-            "https://api.rebrandly.com/v1/links",
-            headers=headers,
-            json=payload,
-            timeout=20
-        )
-
-        if response.ok:
-
-            data = response.json()
-
-            short_url = extract_short_url(
-                data
-            )
-
-            if short_url:
-                return short_url
-
-            short = data.get(
-                "shortUrl"
-            )
-
-            if short:
-
-                return (
-                    "https://"
-                    + str(short).lstrip("/")
-                )
-
-    except Exception as e:
-
-        logger.warning(
-            "Rebrandly failed: %s",
-            e
-        )
-
-    return None
-
-
-def create_shortio(
-    destination
-):
-
-    headers = {
-        "Authorization":
-            SHORTENER_API_KEY,
-        "Content-Type":
-            "application/json",
-    }
-
-    payload = {
-        "originalURL": destination
-    }
-
-    try:
-
-        response = requests.post(
-            "https://api.short.io/links",
-            headers=headers,
-            json=payload,
-            timeout=20
-        )
-
-        if response.ok:
-
-            data = response.json()
-
-            result = extract_short_url(
-                data
-            )
-
-            if result:
-                return result
-
-            domain = data.get(
-                "shortURL"
-            )
-
-            if domain:
-                return domain
-
-    except Exception as e:
-
-        logger.warning(
-            "Short.io failed: %s",
-            e
-        )
-
-    return None
-
-
 def create_generic_shortener(
-    destination
+    destination,
+    api_url,
+    api_key
 ):
 
-    endpoints = unique_endpoints()
+    if not api_url or not api_key:
+        return None
+
+    endpoints = unique_endpoints(
+        api_url
+    )
 
     # -----------------------------------------------------
     # GET
@@ -995,42 +749,42 @@ def create_generic_shortener(
     get_parameters = [
 
         {
-            "api": SHORTENER_API_KEY,
+            "api": api_key,
             "url": destination,
         },
 
         {
-            "api_key": SHORTENER_API_KEY,
+            "api_key": api_key,
             "url": destination,
         },
 
         {
-            "key": SHORTENER_API_KEY,
+            "key": api_key,
             "url": destination,
         },
 
         {
-            "token": SHORTENER_API_KEY,
+            "token": api_key,
             "url": destination,
         },
 
         {
-            "apikey": SHORTENER_API_KEY,
+            "apikey": api_key,
             "url": destination,
         },
 
         {
-            "api": SHORTENER_API_KEY,
+            "api": api_key,
             "link": destination,
         },
 
         {
-            "api_key": SHORTENER_API_KEY,
+            "api_key": api_key,
             "link": destination,
         },
 
         {
-            "key": SHORTENER_API_KEY,
+            "key": api_key,
             "link": destination,
         },
     ]
@@ -1074,42 +828,42 @@ def create_generic_shortener(
 
         {
             "url": destination,
-            "api": SHORTENER_API_KEY,
+            "api": api_key,
         },
 
         {
             "url": destination,
-            "api_key": SHORTENER_API_KEY,
+            "api_key": api_key,
         },
 
         {
             "url": destination,
-            "key": SHORTENER_API_KEY,
+            "key": api_key,
         },
 
         {
             "link": destination,
-            "api": SHORTENER_API_KEY,
+            "api": api_key,
         },
 
         {
             "link": destination,
-            "api_key": SHORTENER_API_KEY,
+            "api_key": api_key,
         },
 
         {
             "originalURL": destination,
-            "api": SHORTENER_API_KEY,
+            "api": api_key,
         },
 
         {
             "long_url": destination,
-            "api": SHORTENER_API_KEY,
+            "api": api_key,
         },
 
         {
             "destination": destination,
-            "api": SHORTENER_API_KEY,
+            "api": api_key,
         },
     ]
 
@@ -1177,91 +931,175 @@ def create_generic_shortener(
     return None
 
 
+# =========================================================
+# SHORTENER ROTATION
+# =========================================================
+
+def get_next_shortener():
+
+    if not db_ready():
+        return 1
+
+    try:
+
+        document = (
+            db.gateway_settings.find_one_and_update(
+                {
+                    "_id":
+                        "shortener_rotation"
+                },
+                {
+                    "$setOnInsert": {
+                        "next": 1
+                    }
+                },
+                upsert=True,
+                return_document=ReturnDocument.AFTER
+            )
+        )
+
+        current = int(
+            document.get(
+                "next",
+                1
+            )
+        )
+
+        # Next request will use the other one.
+        next_value = (
+            2
+            if current == 1
+            else 1
+        )
+
+        db.gateway_settings.update_one(
+            {
+                "_id":
+                    "shortener_rotation"
+            },
+            {
+                "$set": {
+                    "next":
+                        next_value
+                }
+            }
+        )
+
+        return current
+
+    except Exception as e:
+
+        logger.warning(
+            "Shortener rotation failed: %s",
+            e
+        )
+
+        return 1
+
+
 def create_shortener_link(
     destination
 ):
 
-    if not SHORTENER_API_URL:
+    available = []
 
-        logger.error(
-            "SHORTENER_API_URL is missing"
-        )
-
-        return None
-
-    if not SHORTENER_API_KEY:
-
-        logger.error(
-            "SHORTENER_API_KEY is missing"
-        )
-
-        return None
-
-    provider = shortener_provider()
-
-    logger.info(
-        "Using shortener provider: %s",
-        provider
-    )
-
-    # -----------------------------------------------------
-    # BITLY
-    # -----------------------------------------------------
-
-    if provider == "bitly":
-
-        result = create_bitly(
-            destination
-        )
-
-        if result:
-            return result
-
-    # -----------------------------------------------------
-    # REBRANDLY
-    # -----------------------------------------------------
-
-    if provider == "rebrandly":
-
-        result = create_rebrandly(
-            destination
-        )
-
-        if result:
-            return result
-
-    # -----------------------------------------------------
-    # SHORT.IO
-    # -----------------------------------------------------
-
-    if provider in (
-        "short.io",
-        "shortio",
+    if (
+        SHORTENER1_API_URL
+        and SHORTENER1_API_KEY
     ):
 
-        result = create_shortio(
-            destination
+        available.append(1)
+
+    if (
+        SHORTENER2_API_URL
+        and SHORTENER2_API_KEY
+    ):
+
+        available.append(2)
+
+    if not available:
+
+        logger.error(
+            "No shortener configured"
         )
 
-        if result:
-            return result
+        return None, None
 
-    # -----------------------------------------------------
-    # GENERIC
-    # -----------------------------------------------------
+    selected = get_next_shortener()
+
+    # If selected shortener is not configured,
+    # use the available one.
+    if selected not in available:
+
+        selected = available[0]
+
+    if selected == 1:
+
+        api_url = SHORTENER1_API_URL
+        api_key = SHORTENER1_API_KEY
+
+    else:
+
+        api_url = SHORTENER2_API_URL
+        api_key = SHORTENER2_API_KEY
+
+    logger.info(
+        "Selected shortener: %s",
+        selected
+    )
 
     result = create_generic_shortener(
-        destination
+        destination,
+        api_url,
+        api_key
     )
 
     if result:
-        return result
 
-    logger.error(
-        "Unable to create shortener link"
+        return result, selected
+
+    # -----------------------------------------------------
+    # FALLBACK
+    # -----------------------------------------------------
+
+    other = (
+        2
+        if selected == 1
+        else 1
     )
 
-    return None
+    if other == 1:
+
+        api_url = SHORTENER1_API_URL
+        api_key = SHORTENER1_API_KEY
+
+    else:
+
+        api_url = SHORTENER2_API_URL
+        api_key = SHORTENER2_API_KEY
+
+    if (
+        api_url
+        and api_key
+    ):
+
+        logger.warning(
+            "Shortener %s failed, trying shortener %s",
+            selected,
+            other
+        )
+
+        result = create_generic_shortener(
+            destination,
+            api_url,
+            api_key
+        )
+
+        if result:
+
+            return result, other
+
+    return None, None
 
 
 # =========================================================
@@ -1280,37 +1118,33 @@ def home():
 
 <meta charset="UTF-8">
 
-<meta
-name="viewport"
-content="width=device-width, initial-scale=1.0"
->
+<meta name="viewport"
+      content="width=device-width, initial-scale=1.0">
 
-<title>
-Lozo Gateway
-</title>
+<title>Lozo Gateway</title>
 
 <style>
 
 body {
-    margin: 0;
-    min-height: 100vh;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    background: #0f0f0f;
-    color: white;
-    font-family: Arial, sans-serif;
+    margin:0;
+    min-height:100vh;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    background:#0f0f0f;
+    color:white;
+    font-family:Arial,sans-serif;
 }
 
 .box {
-    padding: 35px;
-    text-align: center;
-    border-radius: 18px;
-    background: #191919;
+    padding:35px;
+    text-align:center;
+    border-radius:18px;
+    background:#191919;
 }
 
 p {
-    color: #aaa;
+    color:#aaa;
 }
 
 </style>
@@ -1345,33 +1179,33 @@ Secure gateway is active.
 @app.get("/health")
 def health():
 
-    result = {
-        "ok": True,
+    return JSONResponse(
+        {
+            "ok": True,
+            "service": "lozo-gateway",
+            "database": db_ready(),
 
-        "service":
-            "lozo-gateway",
-
-        "database":
-            db_ready(),
-
-        "shortener":
-            bool(
-                SHORTENER_API_URL
-                and SHORTENER_API_KEY
+            "shortener1": bool(
+                SHORTENER1_API_URL
+                and SHORTENER1_API_KEY
             ),
 
-        "token_namespaces": [
-            "bot_bot1_tokens",
-            "bot_bot2_tokens",
-            "tokens",
-        ],
+            "shortener2": bool(
+                SHORTENER2_API_URL
+                and SHORTENER2_API_KEY
+            ),
 
-        "gateway_entries":
-            db_ready(),
-    }
+            "rotation": True,
 
-    return JSONResponse(
-        result
+            "token_namespaces": [
+                "bot_bot1_tokens",
+                "bot_bot2_tokens",
+                "tokens",
+            ],
+
+            "gateway_entries":
+                db_ready(),
+        }
     )
 
 
@@ -1401,13 +1235,10 @@ def gateway(
             "Gateway database is unavailable."
         )
 
-    # -----------------------------------------------------
-    # FIND UNIQUE GATEWAY ENTRY
-    # -----------------------------------------------------
-
     gateway_entry = db.gateway_entries.find_one(
         {
-            "entry_id": entry
+            "entry_id":
+                entry
         },
         {
             "_id": 0
@@ -1421,19 +1252,11 @@ def gateway(
             "This gateway link is invalid or no longer available."
         )
 
-    # -----------------------------------------------------
-    # EXACT GENERATED URL ALREADY USED
-    # -----------------------------------------------------
-
     if gateway_entry.get(
         "used"
     ) is True:
 
         return already_used_page()
-
-    # -----------------------------------------------------
-    # ORIGINAL TOKEN
-    # -----------------------------------------------------
 
     original_token = str(
         gateway_entry.get(
@@ -1449,14 +1272,6 @@ def gateway(
             "Original token is missing."
         )
 
-    # -----------------------------------------------------
-    # ORIGINAL TOKEN VALIDATION
-    #
-    # The original token is ONLY checked.
-    #
-    # It is never consumed here.
-    # -----------------------------------------------------
-
     token_record = get_token_record(
         original_token
     )
@@ -1467,10 +1282,6 @@ def gateway(
             "Invalid Link",
             "This link is invalid or no longer available."
         )
-
-    # -----------------------------------------------------
-    # TOKEN EXPIRY
-    # -----------------------------------------------------
 
     now = datetime.now(
         timezone.utc
@@ -1496,10 +1307,6 @@ def gateway(
                 "Link Expired",
                 "This file link has expired."
             )
-
-    # -----------------------------------------------------
-    # BOT
-    # -----------------------------------------------------
 
     bot_id = (
         token_record.get(
@@ -1527,10 +1334,6 @@ def gateway(
             f"Bot username for {bot_id} is not configured."
         )
 
-    # -----------------------------------------------------
-    # BROWSER
-    # -----------------------------------------------------
-
     browser_id = request.cookies.get(
         "lozo_browser_id"
     )
@@ -1548,10 +1351,6 @@ def gateway(
     browser_hash = hashlib.sha256(
         browser_id.encode()
     ).hexdigest()
-
-    # -----------------------------------------------------
-    # NEW SESSION
-    # -----------------------------------------------------
 
     state = secrets.token_urlsafe(
         32
@@ -1607,10 +1406,6 @@ def gateway(
             False,
     }
 
-    # -----------------------------------------------------
-    # SAVE SESSION
-    # -----------------------------------------------------
-
     try:
 
         save_session(
@@ -1629,10 +1424,6 @@ def gateway(
             "Unable to create gateway session."
         )
 
-    # -----------------------------------------------------
-    # COMPLETE URL
-    # -----------------------------------------------------
-
     complete_url = (
         f"{GATEWAY_DOMAIN}/api/complete?"
         + urlencode(
@@ -1643,12 +1434,10 @@ def gateway(
         )
     )
 
-    # -----------------------------------------------------
-    # UNIVERSAL SHORTENER
-    # -----------------------------------------------------
-
-    shortener_url = create_shortener_link(
-        complete_url
+    shortener_url, shortener_number = (
+        create_shortener_link(
+            complete_url
+        )
     )
 
     if not shortener_url:
@@ -1668,25 +1457,10 @@ def gateway(
             "shortener_url":
                 shortener_url,
 
-            "vplink_url":
-                shortener_url,
+            "shortener_number":
+                shortener_number,
         }
     )
-
-    # -----------------------------------------------------
-    # ATOMICALLY CONSUME ONLY THIS ENTRY
-    #
-    # The original Telegram token is NOT changed.
-    #
-    # Only:
-    #
-    # gateway_entries.used = True
-    #
-    # Therefore:
-    #
-    # Same entry -> one time
-    # New entry from same token -> works normally
-    # -----------------------------------------------------
 
     claim_result = db.gateway_entries.update_one(
         {
@@ -1714,10 +1488,6 @@ def gateway(
         )
 
         return already_used_page()
-
-    # -----------------------------------------------------
-    # ACCESS
-    # -----------------------------------------------------
 
     response = RedirectResponse(
         url=f"/access/{access_id}",
@@ -1785,10 +1555,6 @@ def access_page(
         timezone.utc
     )
 
-    # -----------------------------------------------------
-    # SESSION EXPIRY
-    # -----------------------------------------------------
-
     expires_at = session.get(
         "expires_at"
     )
@@ -1810,19 +1576,11 @@ def access_page(
                 "This gateway session has expired."
             )
 
-    # -----------------------------------------------------
-    # ALREADY OPENED
-    # -----------------------------------------------------
-
     if session.get(
         "opened"
     ):
 
         return already_used_page()
-
-    # -----------------------------------------------------
-    # BROWSER
-    # -----------------------------------------------------
 
     browser_id = request.cookies.get(
         "lozo_browser_id"
@@ -1848,10 +1606,6 @@ def access_page(
             "This session belongs to another browser."
         )
 
-    # -----------------------------------------------------
-    # ATOMIC ONE-TIME OPEN
-    # -----------------------------------------------------
-
     result = db.gateway_states.update_one(
         {
             "access_id":
@@ -1875,17 +1629,8 @@ def access_page(
 
         return already_used_page()
 
-    # -----------------------------------------------------
-    # SHORTENER
-    # -----------------------------------------------------
-
-    shortener_url = (
-        session.get(
-            "shortener_url"
-        )
-        or session.get(
-            "vplink_url"
-        )
+    shortener_url = session.get(
+        "shortener_url"
     )
 
     if not shortener_url:
@@ -1909,10 +1654,8 @@ def access_page(
 
 <meta charset="UTF-8">
 
-<meta
-name="viewport"
-content="width=device-width, initial-scale=1.0"
->
+<meta name="viewport"
+      content="width=device-width, initial-scale=1.0">
 
 <meta
 http-equiv="refresh"
@@ -1926,23 +1669,23 @@ Lozo Gateway
 <style>
 
 body {{
-    margin: 0;
-    min-height: 100vh;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    background: #0f0f0f;
-    color: white;
-    font-family: Arial, sans-serif;
+    margin:0;
+    min-height:100vh;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    background:#0f0f0f;
+    color:white;
+    font-family:Arial,sans-serif;
 }}
 
 .box {{
-    text-align: center;
-    padding: 30px;
+    text-align:center;
+    padding:30px;
 }}
 
 p {{
-    color: #aaa;
+    color:#aaa;
 }}
 
 </style>
@@ -2000,10 +1743,6 @@ def complete(
             "This gateway session is invalid."
         )
 
-    # -----------------------------------------------------
-    # GATEWAY MUST HAVE BEEN OPENED
-    # -----------------------------------------------------
-
     if session.get(
         "opened"
     ) is not True:
@@ -2012,10 +1751,6 @@ def complete(
             "Invalid Session",
             "This gateway session has not been opened correctly."
         )
-
-    # -----------------------------------------------------
-    # DELIVERY ALREADY COMPLETED
-    # -----------------------------------------------------
 
     if session.get(
         "used"
@@ -2048,10 +1783,6 @@ def complete(
                 "This gateway session has expired."
             )
 
-    # -----------------------------------------------------
-    # BROWSER
-    # -----------------------------------------------------
-
     browser_id = request.cookies.get(
         "lozo_browser_id"
     )
@@ -2076,10 +1807,6 @@ def complete(
             "This session belongs to another browser."
         )
 
-    # -----------------------------------------------------
-    # ALREADY VERIFIED
-    # -----------------------------------------------------
-
     if session.get(
         "verified"
     ):
@@ -2091,10 +1818,6 @@ def complete(
             ),
             status_code=302
         )
-
-    # -----------------------------------------------------
-    # CREATE VERIFICATION
-    # -----------------------------------------------------
 
     verify_id = secrets.token_urlsafe(
         32
@@ -2148,10 +1871,8 @@ def complete(
 
 <meta charset="UTF-8">
 
-<meta
-name="viewport"
-content="width=device-width, initial-scale=1.0"
->
+<meta name="viewport"
+      content="width=device-width, initial-scale=1.0">
 
 <title>
 Verification
@@ -2160,50 +1881,50 @@ Verification
 <style>
 
 body {{
-    margin: 0;
-    min-height: 100vh;
-    display: flex;
-    align-items: center;
-    justify-content: center;
-    background: #0f0f0f;
-    color: white;
-    font-family: Arial, sans-serif;
+    margin:0;
+    min-height:100vh;
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    background:#0f0f0f;
+    color:white;
+    font-family:Arial,sans-serif;
 }}
 
 .box {{
-    width: 90%;
-    max-width: 430px;
-    box-sizing: border-box;
-    padding: 30px;
-    text-align: center;
-    border-radius: 18px;
-    background: #191919;
+    width:90%;
+    max-width:430px;
+    box-sizing:border-box;
+    padding:30px;
+    text-align:center;
+    border-radius:18px;
+    background:#191919;
 }}
 
 h1 {{
-    margin-bottom: 12px;
+    margin-bottom:12px;
 }}
 
 p {{
-    color: #aaa;
-    line-height: 1.6;
+    color:#aaa;
+    line-height:1.6;
 }}
 
 .btn {{
-    display: inline-block;
-    margin-top: 20px;
-    padding: 14px 25px;
-    border-radius: 10px;
-    background: #ffffff;
-    color: #000000;
-    text-decoration: none;
-    font-weight: bold;
+    display:inline-block;
+    margin-top:20px;
+    padding:14px 25px;
+    border-radius:10px;
+    background:#ffffff;
+    color:#000000;
+    text-decoration:none;
+    font-weight:bold;
 }}
 
 .brand {{
-    margin-top: 25px;
-    color: #777;
-    font-size: 13px;
+    margin-top:25px;
+    color:#777;
+    font-size:13px;
 }}
 
 </style>
@@ -2264,10 +1985,6 @@ def verify(
             "This verification session is invalid."
         )
 
-    # -----------------------------------------------------
-    # DELIVERY ALREADY USED
-    # -----------------------------------------------------
-
     if session.get(
         "used"
     ):
@@ -2277,10 +1994,6 @@ def verify(
     now = datetime.now(
         timezone.utc
     )
-
-    # -----------------------------------------------------
-    # BROWSER
-    # -----------------------------------------------------
 
     browser_id = request.cookies.get(
         "lozo_browser_id"
@@ -2305,10 +2018,6 @@ def verify(
             "Browser Mismatch",
             "This session belongs to another browser."
         )
-
-    # -----------------------------------------------------
-    # VERIFY EXPIRY
-    # -----------------------------------------------------
 
     verify_expires_at = session.get(
         "verify_expires_at"
@@ -2336,10 +2045,6 @@ def verify(
             "Please start the gateway again."
         )
 
-    # -----------------------------------------------------
-    # CHALLENGE
-    # -----------------------------------------------------
-
     expected_hash = session.get(
         "challenge_hash"
     )
@@ -2357,10 +2062,6 @@ def verify(
             "Invalid Verification",
             "The verification challenge is invalid."
         )
-
-    # -----------------------------------------------------
-    # MARK VERIFIED
-    # -----------------------------------------------------
 
     update_session(
         session["state"],
@@ -2423,10 +2124,6 @@ def deliver(
             "This gateway session is invalid."
         )
 
-    # -----------------------------------------------------
-    # GATEWAY MUST HAVE BEEN OPENED
-    # -----------------------------------------------------
-
     if session.get(
         "opened"
     ) is not True:
@@ -2435,10 +2132,6 @@ def deliver(
             "Invalid Session",
             "This gateway session has not been opened correctly."
         )
-
-    # -----------------------------------------------------
-    # ALREADY USED
-    # -----------------------------------------------------
 
     if session.get(
         "used"
@@ -2449,10 +2142,6 @@ def deliver(
     now = datetime.now(
         timezone.utc
     )
-
-    # -----------------------------------------------------
-    # BROWSER
-    # -----------------------------------------------------
 
     browser_id = request.cookies.get(
         "lozo_browser_id"
@@ -2478,10 +2167,6 @@ def deliver(
             "This session belongs to another browser."
         )
 
-    # -----------------------------------------------------
-    # SESSION EXPIRY
-    # -----------------------------------------------------
-
     expires_at = session.get(
         "expires_at"
     )
@@ -2503,10 +2188,6 @@ def deliver(
                 "This gateway session has expired."
             )
 
-    # -----------------------------------------------------
-    # VERIFICATION
-    # -----------------------------------------------------
-
     verified_cookie = request.cookies.get(
         "lozo_verified"
     )
@@ -2521,10 +2202,6 @@ def deliver(
                 "Verification Required",
                 "Please complete verification first."
             )
-
-    # -----------------------------------------------------
-    # VERIFICATION EXPIRY
-    # -----------------------------------------------------
 
     verify_expires_at = session.get(
         "verify_expires_at"
@@ -2546,10 +2223,6 @@ def deliver(
                 "Verification Expired",
                 "Please start the gateway again."
             )
-
-    # -----------------------------------------------------
-    # ORIGINAL TOKEN
-    # -----------------------------------------------------
 
     original_token = session.get(
         "token"
@@ -2573,10 +2246,6 @@ def deliver(
             "The original token no longer exists."
         )
 
-    # -----------------------------------------------------
-    # TOKEN EXPIRY
-    # -----------------------------------------------------
-
     token_expiry = token_record.get(
         "expires_at"
     )
@@ -2597,10 +2266,6 @@ def deliver(
                 "Link Expired",
                 "This file link has expired."
             )
-
-    # -----------------------------------------------------
-    # BOT
-    # -----------------------------------------------------
 
     bot_id = (
         session.get(
@@ -2631,14 +2296,6 @@ def deliver(
             f"Bot username for {bot_id} is not configured."
         )
 
-    # -----------------------------------------------------
-    # ATOMIC DELIVERY USE
-    #
-    # Only this gateway session is consumed.
-    #
-    # Original Telegram token remains reusable.
-    # -----------------------------------------------------
-
     result = db.gateway_states.update_one(
         {
             "state":
@@ -2661,10 +2318,6 @@ def deliver(
     if result.modified_count != 1:
 
         return already_used_page()
-
-    # -----------------------------------------------------
-    # TELEGRAM DELIVERY
-    # -----------------------------------------------------
 
     telegram_url = (
         f"https://t.me/{bot_username}"
@@ -2692,14 +2345,6 @@ def deliver(
 
     response.delete_cookie(
         "lozo_verified"
-    )
-
-    response.delete_cookie(
-        "lozo_vplink"
-    )
-
-    response.delete_cookie(
-        "lozo_shortener"
     )
 
     return response
@@ -2751,11 +2396,6 @@ def debug_session(
 
     safe.pop(
         "challenge_hash",
-        None
-    )
-
-    safe.pop(
-        "vplink_url",
         None
     )
 
