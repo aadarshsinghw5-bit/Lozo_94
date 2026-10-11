@@ -115,28 +115,69 @@ def initialize_database():
                     exc,
                 )
 
+        
         # Gateway sessions.
-        db.gateway_states.create_index(
-            [("state", ASCENDING)],
-            name="state_1",
-            unique=True,
-        )
-        db.gateway_states.create_index(
-            [("token", ASCENDING)],
-            name="token_1",
-            unique=False,
-        )
-        db.gateway_states.create_index(
-            [("access_id", ASCENDING)],
-            name="access_id_1",
-            unique=True,
-        )
-        db.gateway_states.create_index(
-            [("verify_id", ASCENDING)],
-            name="verify_id_1",
-            unique=True,
-            sparse=True,
-        )
+        states = db.gateway_states
+
+        # Keep existing indexes compatible; don't recreate them blindly.
+        existing_indexes = {
+            idx["name"]: idx
+            for idx in states.list_indexes()
+        }
+
+        # Standard indexes.
+        if "state_1" not in existing_indexes:
+            states.create_index(
+                [("state", ASCENDING)],
+                name="state_1",
+                unique=True,
+            )
+
+        if "token_1" not in existing_indexes:
+            states.create_index(
+                [("token", ASCENDING)],
+                name="token_1",
+                unique=False,
+            )
+
+        if "access_id_1" not in existing_indexes:
+            states.create_index(
+                [("access_id", ASCENDING)],
+                name="access_id_1",
+                unique=True,
+            )
+
+        # verify_id: old documents may have missing/null values.
+        # A partial unique index ignores documents without a string verify_id.
+        verify_index = existing_indexes.get("verify_id_1")
+
+        if verify_index:
+            is_compatible = (
+                verify_index.get("unique", False)
+                and verify_index.get("partialFilterExpression")
+                == {"verify_id": {"$type": "string"}}
+            )
+
+            if not is_compatible:
+                states.drop_index("verify_id_1")
+                states.create_index(
+                    [("verify_id", ASCENDING)],
+                    name="verify_id_1",
+                    unique=True,
+                    partialFilterExpression={
+                        "verify_id": {"$type": "string"}
+                    },
+                )
+        else:
+            states.create_index(
+                [("verify_id", ASCENDING)],
+                name="verify_id_1",
+                unique=True,
+                partialFilterExpression={
+                    "verify_id": {"$type": "string"}
+                },
+            )
+
 
         # Gateway entry links.
         db.gateway_entries.create_index(
