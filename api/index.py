@@ -537,13 +537,41 @@ def get_session_by_verify_id(
     )
 
 
-def save_session(session):
 
-    db.gateway_states.insert_one(
-        session
+def save_session(session):
+    if not db_ready():
+        raise RuntimeError("MongoDB is not connected")
+
+    state = str(session.get("state") or "").strip()
+
+    if not state:
+        raise ValueError("Gateway state is empty")
+
+    session["state"] = state
+
+    result = db.gateway_states.insert_one(session)
+
+    saved = db.gateway_states.find_one(
+        {
+            "_id": result.inserted_id,
+            "state": state
+        },
+        {
+            "_id": 1,
+            "state": 1
+        }
+    )
+
+    if not saved:
+        raise RuntimeError("Gateway session save verification failed")
+
+    logger.info(
+        "GATEWAY_STATE_SAVED state=%s",
+        state
     )
 
     return True
+
 
 
 def update_session(
